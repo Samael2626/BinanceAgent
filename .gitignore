@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+*.log
+backend/.env
+backend/bot_data.db*
+
+# Node / React
+node_modules/
+dist/
+build/
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Binaries
+*.exe
+*.bin

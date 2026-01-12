@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-binance
+pandas
+pandas_ta
+python-dotenv
+scipy
+mplfinance
+matplotlib
+
