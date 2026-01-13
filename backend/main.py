@@ -1,3 +1,8 @@
+"""
+Binance Trading Bot - Stable Version 1.8.0
+(c) 2026 - Satanael26/BinanceAgent
+Architecture: FastAPI / React
+"""
 from fastapi import FastAPI, HTTPException, Body, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import secrets
@@ -65,7 +70,7 @@ async def lifespan(app: FastAPI):
 
 # Initialize App
 app = FastAPI(title="Binance Trading Bot API",
-              version="2.0.0", lifespan=lifespan)
+              version="1.8.0", lifespan=lifespan)
 
 # Configure CORS
 app.add_middleware(
@@ -219,7 +224,7 @@ def get_current_user_info(user: dict = Depends(get_current_user)):
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "Binance Trading Bot Backend v2.0 - Multi-User"}
+    return {"status": "online", "message": "Binance Trading Bot Backend v1.8.0 Stable - Multi-User"}
 
 
 @app.get("/health")

@@ -1,3 +1,7 @@
+"""
+Binance Trading Bot - Module: binance_wrapper.py
+Version: 1.8.0 Stable (c) 2026
+"""
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from binance import BinanceSocketManager
@@ -7,6 +11,7 @@ from typing import List, Dict, Optional, Callable
 from math import floor, ceil
 import asyncio
 import threading
+import time
 
 
 class BinanceWrapper:
@@ -36,6 +41,7 @@ class BinanceWrapper:
         self._loop = None
         self._sockets = {}
         self._stop_events = {}
+        self._symbol_info_cache = {}  # Cache to avoid redundant API calls
 
     def get_historical_klines(self, symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
         try:
@@ -83,8 +89,20 @@ class BinanceWrapper:
             return 0.0
 
     def get_symbol_info(self, symbol: str) -> Optional[Dict]:
+        """Fetches symbol info with basic caching (5 min)."""
+        now = asyncio.get_event_loop().time() if self._loop else time.time()
+
+        if symbol in self._symbol_info_cache:
+            info, expiry = self._symbol_info_cache[symbol]
+            if now < expiry:
+                return info
+
         try:
-            return self.client.get_symbol_info(symbol)
+            info = self.client.get_symbol_info(symbol)
+            if info:
+                # Cache for 5 minutes
+                self._symbol_info_cache[symbol] = (info, now + 300)
+            return info
         except Exception as e:
             print(f"Error getting symbol info: {e}")
             return None
@@ -96,7 +114,7 @@ class BinanceWrapper:
             return quantity
 
         for f in info['filters']:
-            if f['filterType'] == 'LOT_SIZE':
+            if f['filterType'] in ['LOT_SIZE', 'MARKET_LOT_SIZE']:
                 step_size = float(f['stepSize'])
                 precision = int(round(-np.log10(step_size)))
                 normalized = floor(
@@ -104,34 +122,43 @@ class BinanceWrapper:
                 return normalized
         return quantity
 
-    def adjust_to_min_notional(self, symbol: str, quantity: float, price: float) -> Optional[float]:
+    def adjust_to_min_notional(self, symbol: str, quantity: float, price: float, is_quote_qty: bool = False) -> Optional[float]:
         """Checks if quantity * price < MIN_NOTIONAL and adjusts if needed."""
         info = self.get_symbol_info(symbol)
         if not info:
             return None
 
         filters = {f['filterType']: f for f in info['filters']}
-        min_notional = 5.0
-        if 'MIN_NOTIONAL' in filters:
-            min_notional = float(filters['MIN_NOTIONAL']['minNotional'])
-        elif 'NOTIONAL' in filters:
+
+        # Priority: NOTIONAL (modern) > MIN_NOTIONAL (legacy)
+        min_notional = 6.0  # Default conservative minimum
+        if 'NOTIONAL' in filters:
             min_notional = float(filters['NOTIONAL']['minNotional'])
+        elif 'MIN_NOTIONAL' in filters:
+            min_notional = float(filters['MIN_NOTIONAL']['minNotional'])
 
-        if quantity * price >= min_notional:
+        notional = quantity if is_quote_qty else quantity * price
+
+        # Buffer: Always aim slightly above the minimum to avoid floating point issues
+        target_notional = max(min_notional * 1.05, 6.0)
+
+        if notional >= min_notional:
             return None
 
-        step_size = None
-        if 'LOT_SIZE' in filters:
-            step_size = float(filters['LOT_SIZE']['stepSize'])
-        if not step_size:
+        if is_quote_qty:
+            return target_notional
+
+        # For base quantity, we must respect LOT_SIZE
+        lot_filter = filters.get('LOT_SIZE') or filters.get('MARKET_LOT_SIZE')
+        if not lot_filter:
             return None
 
-        # Buffer safe to 6 USDT minimum
-        target_notional = max(min_notional * 1.1, 6.0)
+        step_size = float(lot_filter['stepSize'])
         required_qty = target_notional / price
         precision = int(round(-np.log10(step_size)))
         adjusted_qty = ceil(required_qty * (10**precision)) / (10**precision)
 
+        # double check
         if adjusted_qty * price < min_notional:
             adjusted_qty += step_size
 
@@ -144,22 +171,30 @@ class BinanceWrapper:
             return True, "OK"
 
         filters = {f['filterType']: f for f in info['filters']}
-        if not is_quote_qty and 'LOT_SIZE' in filters:
-            f = filters['LOT_SIZE']
-            if quantity < float(f['minQty']):
-                return False, f"Cantidad menor al mínimo ({f['minQty']})"
-            if quantity > float(f['maxQty']):
-                return False, f"Cantidad excede el máximo ({f['maxQty']})"
 
+        # 1. LOT_SIZE check (only if not using quote quantity)
+        if not is_quote_qty:
+            lot_filter = filters.get(
+                'LOT_SIZE') or filters.get('MARKET_LOT_SIZE')
+            if lot_filter:
+                min_qty = float(lot_filter['minQty'])
+                max_qty = float(lot_filter['maxQty'])
+                if quantity < min_qty:
+                    return False, f"Cantidad {quantity} menor al mínimo ({min_qty} {symbol.replace('USDT', '')})"
+                if quantity > max_qty:
+                    return False, f"Cantidad {quantity} excede el máximo ({max_qty})"
+
+        # 2. NOTIONAL check
         min_notional = 5.0
-        if 'MIN_NOTIONAL' in filters:
-            min_notional = float(filters['MIN_NOTIONAL']['minNotional'])
-        elif 'NOTIONAL' in filters:
+        if 'NOTIONAL' in filters:
             min_notional = float(filters['NOTIONAL']['minNotional'])
+        elif 'MIN_NOTIONAL' in filters:
+            min_notional = float(filters['MIN_NOTIONAL']['minNotional'])
 
         notional = quantity if is_quote_qty else quantity * price
         if notional < min_notional:
-            return False, f"Valor {notional:.2f} USDT menor al mínimo ({min_notional} USDT)"
+            type_str = "Monto" if is_quote_qty else f"Valor ({quantity} * {price})"
+            return False, f"{type_str} {notional:.2f} USDT menor al mínimo permitido de {min_notional} USDT"
 
         return True, "OK"
 

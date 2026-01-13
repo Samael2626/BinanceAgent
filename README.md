@@ -1,4 +1,4 @@
-# Binance Trading Bot
+# Binance Trading Bot [v1.8.0 Stable]
 
 Un bot de trading autónomo para Binance desarrollado con **Python (FastAPI)** y **React (Vite)**.
 

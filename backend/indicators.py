@@ -119,14 +119,25 @@ def calculate_indicators(df: pd.DataFrame, settings: Dict[str, Any]) -> Dict[str
             recent = df.tail(20)
             avg_size = (recent['high'] - recent['low']).mean()
             current_price = float(df['close'].iloc[-1])
-            results['fluctuation_factor'] = avg_size / \
-                (current_price * 0.0002) if current_price > 0 else 1.0
 
-            # Lateral detection (if avg size is too small relative to price)
-            results['is_lateral'] = results['fluctuation_factor'] < 0.5 or (
-                results.get('adx', 25) < 20)
+            if current_price > 0 and not pd.isna(avg_size):
+                results['fluctuation_factor'] = avg_size / \
+                    (current_price * 0.0002)
+            else:
+                results['fluctuation_factor'] = 1.0
+
+            # Lateral detection (if avg size is too small relative to price or ADX is low)
+            adx_val = results.get('adx', 25)
+            ff_val = results.get('fluctuation_factor', 1.0)
+
+            results['is_lateral'] = ff_val < 0.5 or adx_val < 20
         except Exception:
             results['fluctuation_factor'] = 1.0
             results['is_lateral'] = False
+
+    # Final cleanup: Ensure no NaNs are returned to strategy logic
+    for k, v in results.items():
+        if isinstance(v, float) and pd.isna(v):
+            results[k] = 0.0
 
     return results
