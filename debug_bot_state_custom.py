@@ -1,20 +1,17 @@
 from backend.database import DatabaseManager
+import os
 
-db = DatabaseManager()
-user_id = 1
-print(f"IS_RUNNING: {db.get_state('is_running', user_id=user_id)}")
-print(f"ENABLE_BUYING: {db.get_state('enable_buying', user_id=user_id)}")
-print(f"ACTIVE_STRATEGY: {db.get_setting('active_strategy', user_id=user_id)}")
-print(f"SYMBOL: {db.get_setting('symbol', user_id=user_id)}")
-# Check specific symbol or loop?
-print(
-    f"ACCUMULATED_QTY: {db.get_state('accumulated_qty_BNBUSDT', user_id=user_id)}")
-# Actually, I need to know the symbol first.
-symbol = db.get_setting('symbol', "BTCUSDT", user_id=user_id)
-print(f"TARGET_SYMBOL: {symbol}")
-scope_qty = f"accumulated_qty_{symbol}"
-print(f"POS_QTY: {db.get_state(scope_qty, user_id=user_id)}")
+db_path = "backend/bot_data.db"
+if os.path.exists(db_path):
+    db = DatabaseManager(db_path)
+    # Check if bot is running
+    is_running = db.get_setting("bot_is_running", "False", user_id=8)
+    active_strategy = db.get_setting(
+        "active_strategy", "rsi_rebound", user_id=8)
+    symbol = db.get_setting("current_symbol", "BTCUSDT", user_id=8)
 
-print(f"RSI_BUY_THRESHOLD: {db.get_setting('buy_rsi', user_id=user_id)}")
-print(
-    f"MUTUAL_EXCLUSION: {db.get_setting('enable_mutual_exclusion', user_id=user_id)}")
+    print(f"Bot Is Running: {is_running}")
+    print(f"Active Strategy: {active_strategy}")
+    print(f"Current Symbol: {symbol}")
+else:
+    print("Database not found")

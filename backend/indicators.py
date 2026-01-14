@@ -3,6 +3,25 @@ import pandas as pd
 import pandas_ta as ta
 
 
+def calculate_rsi_from_df(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    Robust RSI calculation helper using pandas_ta.
+    Returns 0.0 if calculation fails, ensuring type safety.
+    """
+    if df is None or df.empty or len(df) <= period:
+        return 0.0
+
+    try:
+        rsi = df.ta.rsi(length=period)
+        if rsi is not None and not rsi.empty:
+            val = float(rsi.iloc[-1])
+            return val if not pd.isna(val) else 0.0
+    except Exception:
+        pass
+
+    return 0.0
+
+
 def calculate_indicators(df: pd.DataFrame, settings: Dict[str, Any]) -> Dict[str, float]:
     """
     Calculates technical indicators for the trading bot.
@@ -19,14 +38,8 @@ def calculate_indicators(df: pd.DataFrame, settings: Dict[str, Any]) -> Dict[str
     if df.empty:
         return results
 
-    # RSI Calculation
-    if len(df) > 14:
-        try:
-            rsi = df.ta.rsi(length=14)
-            if rsi is not None and not rsi.empty:
-                results['rsi'] = float(rsi.iloc[-1])
-        except Exception:
-            pass
+    # RSI Calculation (Unified)
+    results['rsi'] = calculate_rsi_from_df(df, period=14)
 
     # MACD Calculation
     macd_fast = int(settings.get('macd_fast', 12))

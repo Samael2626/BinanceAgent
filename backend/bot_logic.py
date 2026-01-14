@@ -1013,7 +1013,12 @@ class BinanceBot:
         try:
             # Si no se especifica, tomar por defecto segun configuracion
             if is_quote is None:
-                is_quote = (self.trade_qty_type == "quote")
+                # If custom_qty is provided (Manual UI override), assume Base Quantity (Crypto)
+                # because the UI calculates and sends the amount in crypto.
+                if custom_qty is not None:
+                    is_quote = False
+                else:
+                    is_quote = (self.trade_qty_type == "quote")
 
             self._log(
                 f"🛒 Manual BUY requested: {custom_qty or self.trade_qty} (is_quote={is_quote})", "INFO")

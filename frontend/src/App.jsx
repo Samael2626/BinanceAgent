@@ -465,7 +465,7 @@ function App() {
     }
   };
 
-  if (!isConnected) {
+  if (!isAuthenticated) {
     return <Login onLoginSuccess={handleLoginSuccess} />
   }
 
@@ -597,7 +597,7 @@ function App() {
              {/* 2. Predictive Dashboard */}
              <div style={{marginBottom: '10px'}}>
                 <PredictiveDashboard 
-                    prediction={{ ...botStatus.prediction, rsi: botStatus.rsi }} 
+                    prediction={{ ...botStatus.prediction, rsi: botStatus.rsi, current_price: botStatus.price }} 
                     isOpen={openPanels['predictive']}
                     onToggle={() => togglePanel('predictive')}
                 />

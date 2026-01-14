@@ -30,10 +30,14 @@ class RSIReboundStrategy(BaseStrategy):
         # 2. Optional Quantitative Filters (Toggleable from Panel)
         if settings.get('enable_trend_filter', True):
             if current_price < trend_ema:
+                self.log_decision(
+                    f"BUY SKIPPED: Price ({current_price:.2f}) below EMA 200 ({trend_ema:.2f})", print)
                 return False
 
         if settings.get('enable_vol_filter', True):
             if current_vol <= vol_sma:
+                self.log_decision(
+                    f"BUY SKIPPED: Low volume ({current_vol:.2f} <= SMA {vol_sma:.2f})", print)
                 return False
 
         self.log_decision(

@@ -3,6 +3,7 @@ RSI Snapshot Module
 Calculates RSI for multiple trading pairs with caching for performance optimization.
 Uses pandas_ta for consistency with bot core indicators.
 """
+from .indicators import calculate_rsi_from_df as calculate_rsi
 import time
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -35,35 +36,6 @@ class RSISnapshotCache:
 
 # Global cache instance
 _rsi_cache = RSISnapshotCache(ttl_seconds=10)
-
-
-def calculate_rsi(df: pd.DataFrame, period: int = 14) -> Optional[float]:
-    """
-    Calculate RSI indicator using pandas_ta (same method as bot core).
-
-    Args:
-        df: DataFrame with OHLCV data
-        period: RSI period (default 14)
-
-    Returns:
-        RSI value or None if calculation fails
-    """
-    try:
-        if df is None or df.empty or len(df) < period + 1:
-            return None
-
-        # Use pandas_ta for consistency with bot's main indicators
-        rsi_series = df.ta.rsi(length=period)
-
-        if rsi_series is None or rsi_series.empty:
-            return None
-
-        # Return last value
-        last_rsi = float(rsi_series.iloc[-1])
-        return last_rsi if not pd.isna(last_rsi) else None
-    except Exception as e:
-        print(f"Error calculating RSI: {e}")
-        return None
 
 
 def calculate_rsi_snapshot(symbols: List[str], client, timeframe: str = "1m") -> List[Dict[str, any]]:
