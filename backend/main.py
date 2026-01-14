@@ -1,6 +1,6 @@
 """
 Binance Trading Bot - Stable Version 1.8.0
-(c) 2026 - Satanael26/BinanceAgent
+(c) 2026 - Samael26/BinanceAgent
 Architecture: FastAPI / React
 """
 from fastapi import FastAPI, HTTPException, Body, Request, Depends
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
 
 # Initialize App
 app = FastAPI(title="Binance Trading Bot API",
-              version="1.8.0", lifespan=lifespan)
+              version="1.8.1", lifespan=lifespan)
 
 # Configure CORS
 app.add_middleware(

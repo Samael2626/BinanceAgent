@@ -950,7 +950,7 @@ class BinanceBot:
 
                     # Fetch klines (Fastest possible fetch)
                     df = self.data_client.get_historical_klines(
-                        symbol, self.timeframe, limit=20)
+                        symbol, self.timeframe, limit=1000)
                     if df is None or df.empty:
                         continue
 
