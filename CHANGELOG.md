@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.9.0] - 2026-01-14
+
+### Major Features
+- **Predictive Engine Integration**: Full integration of `PredictiveEngine` for market analysis (RSI Divergences, RVOL, Bull/Bear Traps, Liquidity Zones).
+- **Dynamic Risk Management (ATR)**: Added ATR-based Dynamic Take Profit to `rsi_rebound.py` strategy.
+- **Smart Money Flow**: Added institutional volume analysis to detection logic.
+
+### Improved
+- **Bot Logic**: Updated to version 1.9.0 logic with enhanced state management.
+- **Frontend**: Updated build version to match backend capabilities.
+
 ## [1.8.2] - 2026-01-14
 
 ### Added

@@ -13,12 +13,13 @@ class RSIReboundStrategy(BaseStrategy):
         super().__init__("RSI Rebound")
 
     def get_required_indicators(self) -> list:
-        return ["rsi", "trend_ema", "vol_sma", "current_vol", "ema_2", "ema_7"]
+        return ["rsi", "trend_ema", "vol_sma", "current_vol", "fast_ema", "atr"]
 
     def check_buy_signal(self, indicators: Dict[str, Any], settings: Dict[str, Any], state: Dict[str, Any]) -> bool:
         rsi = indicators.get('rsi', 50)
         buy_threshold = settings.get('buy_rsi', 21)
         trend_ema = indicators.get('trend_ema', 0)
+        fast_ema = indicators.get('fast_ema', 0)
         current_price = state.get('current_price', 0)
         vol_sma = indicators.get('vol_sma', 0)
         current_vol = indicators.get('current_vol', 0)
@@ -27,7 +28,14 @@ class RSIReboundStrategy(BaseStrategy):
         if rsi >= buy_threshold:
             return False
 
-        # 2. Optional Quantitative Filters (Toggleable from Panel)
+        # 2. Fast EMA Confirmation (Price Rejection/Momentum)
+        if settings.get('enable_fast_ema', True):
+            if current_price < fast_ema:
+                self.log_decision(
+                    f"BUY SKIPPED: Price ({current_price:.2f}) below Fast EMA ({fast_ema:.2f}) - No confirmation.", print)
+                return False
+
+        # 3. Optional Quantitative Filters (Toggleable from Panel)
         if settings.get('enable_trend_filter', True):
             if current_price < trend_ema:
                 self.log_decision(
@@ -60,7 +68,7 @@ class RSIReboundStrategy(BaseStrategy):
             return True
 
         # 2. Risk Management (SL/TP)
-        sl_pct = settings.get('stop_loss_pct', 3.2)  # Default updated to 3.2
+        sl_pct = settings.get('stop_loss_pct', 3.2)
         if sl_pct > 0:
             sl_price = entry_price * (1 - sl_pct / 100)
             if current_price <= sl_price:
@@ -68,12 +76,39 @@ class RSIReboundStrategy(BaseStrategy):
                     f"SELL SIGNAL: Stop Loss triggered @ {current_price:.2f}", print)
                 return True
 
-        tp_pct = settings.get('take_profit_pct', 1.3)  # Default updated to 1.3
-        if tp_pct > 0:
-            tp_price = entry_price * (1 + tp_pct / 100)
-            if current_price >= tp_price:
-                self.log_decision(
-                    f"SELL SIGNAL: Take Profit triggered @ {current_price:.2f}", print)
-                return True
+        # Dynamic Take Profit (ATR) vs Fixed %
+        if settings.get('enable_atr_tp', False):
+            atr = indicators.get('atr', 0)
+            atr_mult = settings.get('atr_tp_multiplier', 2.0)
+
+            if atr > 0:
+                tp_price = entry_price + (atr * atr_mult)
+                # Sanity: TP must be above entry
+                if tp_price <= entry_price:
+                    tp_price = entry_price * 1.01
+
+                if current_price >= tp_price:
+                    self.log_decision(
+                        f"SELL SIGNAL: Dynamic ATR TP triggered @ {current_price:.2f} (ATR: {atr:.2f}, Mult: {atr_mult})", print)
+                    return True
+            else:
+                # Fallback to fixed if ATR missing
+                tp_pct = settings.get('take_profit_pct', 1.3)
+                if tp_pct > 0:
+                    tp_price = entry_price * (1 + tp_pct / 100)
+                    if current_price >= tp_price:
+                        self.log_decision(
+                            f"SELL SIGNAL: Fixed TP (Fallback) triggered @ {current_price:.2f}", print)
+                        return True
+
+        else:
+            # Standard Fixed % TP
+            tp_pct = settings.get('take_profit_pct', 1.3)
+            if tp_pct > 0:
+                tp_price = entry_price * (1 + tp_pct / 100)
+                if current_price >= tp_price:
+                    self.log_decision(
+                        f"SELL SIGNAL: Take Profit triggered @ {current_price:.2f}", print)
+                    return True
 
         return False

@@ -1,6 +1,6 @@
 """
 Binance Trading Bot - Module: bot_logic.py
-Version: 1.8.0 Stable (c) 2026
+Version: 1.9.0 Stable (c) 2026
 """
 import pandas as pd
 import pandas_ta as ta
@@ -61,6 +61,10 @@ class BinanceBot:
             "macd_slow", 26, user_id=user_id))
         self.macd_signal_period = int(
             self.db.get_setting("macd_signal", 9, user_id=user_id))
+        self.fast_ema_len = int(self.db.get_setting(
+            "fast_ema_len", 7, user_id=user_id))
+        self.enable_fast_ema = self.db.get_setting(
+            "enable_fast_ema", "True", user_id=user_id) == "True"
         self.active_strategy = self.db.get_setting(
             "active_strategy", "rsi", user_id=user_id)
         self.trade_qty_type = self.db.get_setting(
@@ -173,6 +177,7 @@ class BinanceBot:
         self.trend_ema = 0.0
         self.ema_2 = 0.0
         self.ema_7 = 0.0
+        self.fast_ema = 0.0
         self.bb_upper = 0.0
         self.bb_middle = 0.0
         self.bb_lower = 0.0
@@ -419,9 +424,11 @@ class BinanceBot:
             try:
                 # RSI 14
                 df.ta.rsi(length=14, append=True)
-                # SMA 50 & 200 (Requested by User for Visuals)
-                df.ta.sma(length=50, append=True)
-                df.ta.sma(length=200, append=True)
+                # Trend EMA & Fast EMA (Matching strategy settings)
+                trend_len = int(self.ema_length)
+                fast_len = int(self.fast_ema_len)
+                df.ta.ema(length=trend_len, append=True)
+                df.ta.ema(length=fast_len, append=True)
             except Exception as e:
                 self._log(
                     f"Error calculating chart indicators: {e}", "WARNING")
@@ -436,13 +443,15 @@ class BinanceBot:
                         df, self.current_price)
 
                 # Construct history with all necessary fields for the Pro Chart
-                # We take the tail(200) to ensure we have enough data for the chart view
                 history_data = []
+                # Define column names for EMAs based on length (pandas_ta pattern: EMA_L)
+                trend_col = f"EMA_{trend_len}"
+                fast_col = f"EMA_{fast_len}"
+
                 for t, r in df.tail(200).iterrows():
-                    # Safely get values, handling potential missing columns or NaNs
                     rsi_val = r.get('RSI_14')
-                    sma50_val = r.get('SMA_50')
-                    sma200_val = r.get('SMA_200')
+                    trend_ema_val = r.get(trend_col)
+                    fast_ema_val = r.get(fast_col)
 
                     # Convert pandas Timestamp to int timestamp if needed
                     ts = int(t.timestamp()) if hasattr(
@@ -456,8 +465,8 @@ class BinanceBot:
                         "close": float(r['close']),
                         "volume": float(r['volume']),
                         "rsi": float(rsi_val) if pd.notna(rsi_val) else None,
-                        "sma_50": float(sma50_val) if pd.notna(sma50_val) else None,
-                        "sma_200": float(sma200_val) if pd.notna(sma200_val) else None,
+                        "trend_ema": float(trend_ema_val) if pd.notna(trend_ema_val) else None,
+                        "fast_ema": float(fast_ema_val) if pd.notna(fast_ema_val) else None,
                     }
                     history_data.append(row)
 
@@ -1085,6 +1094,7 @@ class BinanceBot:
             return {
                 "is_running": self.is_running, "symbol": self.symbol, "mode": "TESTNET" if self.is_testnet else "REAL",
                 "price": round(self.current_price, 2), "balance": round(self.balance, 2), "crypto_balance": round(self.crypto_balance, 6),
+                "entry_price": round(self.entry_price, 6), "accumulated_qty": round(self.accumulated_qty, 8),
                 "pnl": round(self.pnl, 2), "daily_pnl": round(self.daily_pnl, 2), "rsi": round(self.rsi, 2), "ema_200": round(self.trend_ema, 2),
                 "macd": round(self.macd, 2), "macd_signal": round(self.macd_signal, 2), "macd_hist": round(self.macd_hist, 2),
                 "bb_upper": round(self.bb_upper, 2), "bb_lower": round(self.bb_lower, 2), "current_vol": round(self.current_vol, 2),
@@ -1106,7 +1116,9 @@ class BinanceBot:
             "dca_enabled": self.dca_enabled, "enable_rsi_alerts": self.enable_rsi_alerts, "enable_urgent_alerts": self.enable_urgent_alerts,
             "enable_trend_filter": self.enable_trend_filter, "enable_vol_filter": self.enable_vol_filter, "enable_mutual_exclusion": self.enable_mutual_exclusion,
             "rsi_alert_buy_urgent": self.rsi_alert_buy_urgent, "rsi_alert_buy_normal": self.rsi_alert_buy_normal,
-            "rsi_alert_sell_urgent": self.rsi_alert_sell_urgent, "rsi_alert_sell_normal": self.rsi_alert_sell_normal
+            "rsi_alert_sell_urgent": self.rsi_alert_sell_urgent, "rsi_alert_sell_normal": self.rsi_alert_sell_normal,
+            "enable_fast_ema": self.enable_fast_ema, "fast_ema_len": self.fast_ema_len,
+            "ema_length": self.ema_length, "macd_signal": self.macd_signal_period
         }
 
     def update_settings(self, settings: dict):
@@ -1197,6 +1209,11 @@ class BinanceBot:
             )
             self._log(
                 f"✅ Telegram config updated: enabled={self.telegram_enabled}, chat_id={'***' if self.tg_chat_id else 'Not set'}")
+
+        # Trigger immediate data refresh if indicators or timeframe changed
+        if any(k in settings for k in ["ema_length", "fast_ema_len", "timeframe", "macd_fast", "macd_slow", "macd_signal"]):
+            threading.Thread(target=self._update_market_data,
+                             daemon=True).start()
 
         return {"status": "success"}
 

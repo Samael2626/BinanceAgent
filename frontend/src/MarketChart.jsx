@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { createChart, ColorType, CandlestickSeries, LineSeries, CrosshairMode, LineStyle } from 'lightweight-charts';
+import { createChart, ColorType, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, HistogramSeries } from 'lightweight-charts';
 
-const MarketChart = ({ data, symbol, prediction }) => {
+const MarketChart = ({ data, symbol, prediction, entryPrice }) => {
     const chartContainerRef = useRef();
     const rsiContainerRef = useRef();
     
@@ -11,8 +11,10 @@ const MarketChart = ({ data, symbol, prediction }) => {
     
     // Series Refs
     const candleSeriesRef = useRef(null);
-    const sma50Ref = useRef(null);
-    const sma200Ref = useRef(null);
+    const fastEmaRef = useRef(null);
+    const trendEmaRef = useRef(null);
+    const volumeSeriesRef = useRef(null); // New Volume Series
+    const entryPriceLineRef = useRef(null); // New Entry Line
     const projectionRef = useRef(null); // New Projection Series
     const rsiSeriesRef = useRef(null);
     
@@ -56,8 +58,18 @@ const MarketChart = ({ data, symbol, prediction }) => {
             upColor: '#0ECB81', downColor: '#F6465D',
             borderVisible: false, wickUpColor: '#0ECB81', wickDownColor: '#F6465D',
         });
-        const sma50Series = chart.addSeries(LineSeries, { color: '#FCD535', lineWidth: 2, crosshairMarkerVisible: false, lastValueVisible: true, priceLineVisible: false });
-        const sma200Series = chart.addSeries(LineSeries, { color: '#00B4C9', lineWidth: 2, crosshairMarkerVisible: false, lastValueVisible: true, priceLineVisible: false });
+        const fastEmaSeries = chart.addSeries(LineSeries, { color: '#FCD535', lineWidth: 2, crosshairMarkerVisible: false, lastValueVisible: true, priceLineVisible: false });
+        const trendEmaSeries = chart.addSeries(LineSeries, { color: '#3B82F6', lineWidth: 2, crosshairMarkerVisible: false, lastValueVisible: true, priceLineVisible: false });
+        
+        // Volume Series (Overlay at the bottom)
+        const volumeSeries = chart.addSeries(HistogramSeries, {
+            color: '#26a69a',
+            priceFormat: { type: 'volume' },
+            priceScaleId: '', // set as an overlay
+        });
+        chart.priceScale('').applyOptions({
+            scaleMargins: { top: 0.8, bottom: 0 },
+        });
         
         // Projection Series (Dotted)
         const projectionSeries = chart.addSeries(LineSeries, {
@@ -71,8 +83,9 @@ const MarketChart = ({ data, symbol, prediction }) => {
 
         chartRef.current = chart;
         candleSeriesRef.current = candleSeries;
-        sma50Ref.current = sma50Series;
-        sma200Ref.current = sma200Series;
+        fastEmaRef.current = fastEmaSeries;
+        trendEmaRef.current = trendEmaSeries;
+        volumeSeriesRef.current = volumeSeries;
         projectionRef.current = projectionSeries;
 
         // 2. Create RSI Chart
@@ -135,8 +148,8 @@ const MarketChart = ({ data, symbol, prediction }) => {
             } else {
                 const rsiTime = param.time; 
                 const priceData = param.seriesData.get(candleSeries);
-                const sma50Data = param.seriesData.get(sma50Series);
-                const sma200Data = param.seriesData.get(sma200Series);
+                const fastEmaData = param.seriesData.get(fastEmaSeries);
+                const trendEmaData = param.seriesData.get(trendEmaSeries);
                 
                 let rsiVal = null;
                 if (latestDataRef.current) {
@@ -151,8 +164,8 @@ const MarketChart = ({ data, symbol, prediction }) => {
                         high: priceData.high,
                         low: priceData.low,
                         close: priceData.close,
-                        sma50: sma50Data ? sma50Data.value : null,
-                        sma200: sma200Data ? sma200Data.value : null,
+                        fastEma: fastEmaData ? fastEmaData.value : null,
+                        trendEma: trendEmaData ? trendEmaData.value : null,
                         rsi: rsiVal
                     });
                     setTooltipPos({ x: param.point.x, y: param.point.y });
@@ -179,23 +192,54 @@ const MarketChart = ({ data, symbol, prediction }) => {
          if (!chartRef.current || !data || !Array.isArray(data)) return;
  
          const candles = [];
-         const sma50 = [];
-         const sma200 = [];
+         const fastEma = [];
+         const trendEma = [];
+         const volume = [];
          const rsi = [];
  
-         [...data].sort((a, b) => a.time - b.time).forEach(item => {
+         [...data].sort((a, b) => a.time - b.time).forEach((item, index, arr) => {
              if (item.time) {
                  candles.push({ time: item.time, open: item.open, high: item.high, low: item.low, close: item.close });
-                 if (item.sma_50) sma50.push({ time: item.time, value: item.sma_50 });
-                 if (item.sma_200) sma200.push({ time: item.time, value: item.sma_200 });
+                 if (item.fast_ema) fastEma.push({ time: item.time, value: item.fast_ema });
+                 if (item.trend_ema) trendEma.push({ time: item.time, value: item.trend_ema });
                  if (item.rsi) rsi.push({ time: item.time, value: item.rsi });
+                 
+                 // Volume with color logic (Green if close > open)
+                 if (item.volume !== undefined) {
+                     volume.push({ 
+                         time: item.time, 
+                         value: item.volume, 
+                         color: item.close >= item.open ? 'rgba(14, 203, 129, 0.4)' : 'rgba(246, 70, 93, 0.4)' 
+                     });
+                 }
              }
          });
  
          if (candleSeriesRef.current) candleSeriesRef.current.setData(candles);
-         if (sma50Ref.current) sma50Ref.current.setData(sma50);
-         if (sma200Ref.current) sma200Ref.current.setData(sma200);
-         if (rsiSeriesRef.current) rsiSeriesRef.current.setData(rsi);
+         if (fastEmaRef.current) fastEmaRef.current.setData(fastEma);
+         if (trendEmaRef.current) trendEmaRef.current.setData(trendEma);
+         if (volumeSeriesRef.current) volumeSeriesRef.current.setData(volume);
+          if (rsiSeriesRef.current) rsiSeriesRef.current.setData(rsi);
+ 
+          // --- Entry Price Line logic ---
+          if (candleSeriesRef.current) {
+              try {
+                  if (entryPriceLineRef.current) {
+                      candleSeriesRef.current.removePriceLine(entryPriceLineRef.current);
+                      entryPriceLineRef.current = null;
+                  }
+                  if (entryPrice > 0) {
+                      entryPriceLineRef.current = candleSeriesRef.current.createPriceLine({
+                          price: entryPrice,
+                          color: '#FCD535',
+                          lineWidth: 2,
+                          lineStyle: LineStyle.Dashed,
+                          axisLabelVisible: true,
+                          title: 'COMPRA',
+                      });
+                  }
+              } catch (e) { console.warn("Error entry line:", e); }
+          }
  
          // --- Predictive Updates ---
          if (prediction && candleSeriesRef.current) {
@@ -280,8 +324,8 @@ const MarketChart = ({ data, symbol, prediction }) => {
         high: currentData?.high,
         low: currentData?.low,
         close: currentData?.close,
-        sma50: currentData?.sma_50,
-        sma200: currentData?.sma_200,
+        fastEma: currentData?.fast_ema,
+        trendEma: currentData?.trend_ema,
         rsi: currentData?.rsi
     };
      
@@ -311,8 +355,8 @@ const MarketChart = ({ data, symbol, prediction }) => {
                         <span>H: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.high}</span></span>
                         <span>L: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.low}</span></span>
                         <span>C: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.close}</span></span>
-                        {displayData.sma50 && <span style={{ color: '#FCD535' }}>MA(50): {displayData.sma50.toFixed(2)}</span>}
-                        {displayData.sma200 && <span style={{ color: '#00B4C9' }}>MA(200): {displayData.sma200.toFixed(2)}</span>}
+                        {displayData.fastEma && <span style={{ color: '#FCD535' }}>EMA Rápida: {displayData.fastEma.toFixed(2)}</span>}
+                        {displayData.trendEma && <span style={{ color: '#3B82F6' }}>Trend EMA (Larga): {displayData.trendEma.toFixed(2)}</span>}
                         {displayData.rsi && <span style={{ color: '#9370DB' }}>RSI: {displayData.rsi.toFixed(2)}</span>}
                     </>
                 )}

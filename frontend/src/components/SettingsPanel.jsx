@@ -261,11 +261,11 @@ export const StrategySettings = ({ botStatus, updateSettings, showStrategy, setS
 
         {isProMode && (
           <>
-            <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', margin: '10px 0', padding: '10px 0' }}>
+             <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', margin: '10px 0', padding: '10px 0' }}>
                  <label style={{ fontSize: '11px', color: '#848E9C', textTransform: 'uppercase', marginBottom: '10px', display: 'block' }}>Configuración Avanzada de Indicadores</label>
                  <div className="settings-grid-3">
                     <div className="form-group">
-                        <label>EMA Len</label>
+                        <label>Trend EMA</label>
                         <input type="number" className="login-input" value={botStatus.settings?.ema_length} onChange={(e) => updateSettings({ ema_length: e.target.value })} disabled={isUpdating} />
                     </div>
                      <div className="form-group">
@@ -273,8 +273,8 @@ export const StrategySettings = ({ botStatus, updateSettings, showStrategy, setS
                         <input type="number" className="login-input" value={botStatus.settings?.macd_fast} onChange={(e) => updateSettings({ macd_fast: e.target.value })} disabled={isUpdating} />
                     </div>
                     <div className="form-group">
-                        <label>MACD Slow</label>
-                        <input type="number" className="login-input" value={botStatus.settings?.macd_slow} onChange={(e) => updateSettings({ macd_slow: e.target.value })} disabled={isUpdating} />
+                        <label>EMA Rápida</label>
+                        <input type="number" className="login-input" value={botStatus.settings?.fast_ema_len} onChange={(e) => updateSettings({ fast_ema_len: e.target.value })} disabled={isUpdating} />
                     </div>
                  </div>
             </div>
@@ -282,6 +282,10 @@ export const StrategySettings = ({ botStatus, updateSettings, showStrategy, setS
             <div style={{ padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', marginTop: '10px' }}>
                  <label style={{ fontSize: '11px', color: '#848E9C', textTransform: 'uppercase', marginBottom: '10px', display: 'block' }}>Filtros Cuantitativos Senior</label>
                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                         <span style={{ fontSize: '12px' }}>Confirmación EMA Rápida <HelpTooltip text="Solo compra si el precio ya está por encima de la EMA rápida (Confirma el rebote)." /></span>
+                         <input type="checkbox" checked={botStatus.settings?.enable_fast_ema} onChange={(e) => updateSettings({ enable_fast_ema: e.target.checked })} />
+                     </div>
                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                          <span style={{ fontSize: '12px' }}>Filtro Tendencial (EMA200) <HelpTooltip text="Solo compra si el precio está arriba de la tendencia principal." /></span>
                          <input type="checkbox" checked={botStatus.settings?.enable_trend_filter} onChange={(e) => updateSettings({ enable_trend_filter: e.target.checked })} />

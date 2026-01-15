@@ -7,4 +7,7 @@ python-dotenv
 scipy
 mplfinance
 matplotlib
-
+python-telegram-bot
+cryptography
+pytz
+numpy

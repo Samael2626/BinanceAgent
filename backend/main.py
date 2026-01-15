@@ -1,5 +1,5 @@
 """
-Binance Trading Bot - Stable Version 1.8.2
+Binance Trading Bot - Stable Version 1.9.0
 (c) 2026 - Samael26/BinanceAgent
 Architecture: FastAPI / React
 """
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
 
 # Initialize App
 app = FastAPI(title="Binance Trading Bot API",
-              version="1.8.2", lifespan=lifespan)
+              version="1.9.0", lifespan=lifespan)
 
 # Configure CORS
 app.add_middleware(

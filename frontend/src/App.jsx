@@ -605,7 +605,7 @@ function App() {
 
              {/* 3. Main Chart */}
              <div style={{position: 'relative'}}>
-                <MarketChart data={botStatus.history} symbol={botStatus.symbol} prediction={botStatus.prediction} />
+                <MarketChart data={botStatus.history} symbol={botStatus.symbol} prediction={botStatus.prediction} entryPrice={botStatus.entry_price} />
                 <ChartHelp />
              </div>
              

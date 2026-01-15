@@ -80,8 +80,12 @@ def calculate_indicators(df: pd.DataFrame, settings: Dict[str, Any]) -> Dict[str
             pass
 
     # Standard EMAs (Fast)
-    if len(df) > 7:
+    fast_ema_len = int(settings.get('fast_ema_len', 7))
+    if len(df) > fast_ema_len:
         try:
+            results['fast_ema'] = float(
+                df.ta.ema(length=fast_ema_len).iloc[-1])
+            # Keep ema_2 and ema_7 for backward compatibility if needed, but primary is fast_ema
             results['ema_2'] = float(df.ta.ema(length=2).iloc[-1])
             results['ema_7'] = float(df.ta.ema(length=7).iloc[-1])
         except Exception:
