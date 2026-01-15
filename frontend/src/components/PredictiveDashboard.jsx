@@ -129,17 +129,17 @@ const PredictiveDashboard = ({ prediction, isOpen, onToggle }) => {
 const MetricPill = ({ label, value, subValue, color }) => (
     <div style={metricPillStyle}>
         <span style={tinyLabelStyle}>{label}</span>
-        <span style={{ fontSize: '20px', fontWeight: '900', color: color || '#EAECEF', fontFamily: 'Roboto Mono, monospace', margin: '6px 0' }}>{value || '-'}</span>
+        <span style={{ fontSize: '16px', fontWeight: '900', color: color || '#EAECEF', fontFamily: 'Roboto Mono, monospace', margin: '4px 0' }}>{value || '-'}</span>
         <span style={{ fontSize: '12px', opacity: 0.7, color }}>{subValue}</span>
     </div>
 );
 
 // Styles
 const containerStyle = {
-    padding: '16px 12px',
+    padding: '12px 10px',
     display: 'flex',
     flexDirection: 'column',
-    gap: '20px',
+    gap: '14px',
     background: 'rgba(20, 21, 26, 0.4)',
     backdropFilter: 'blur(10px)'
 };
@@ -155,10 +155,10 @@ const headerRowStyle = {
     flexDirection: 'column',
     justifyContent: 'center',
     background: 'linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%)',
-    padding: '20px 24px',
-    borderRadius: '16px',
+    padding: '12px 16px',
+    borderRadius: '12px',
     border: '1px solid rgba(255, 255, 255, 0.08)',
-    boxShadow: '0 4px 20px rgba(0,0,0,0.4)'
+    boxShadow: '0 4px 15px rgba(0,0,0,0.4)'
 };
 
 const scoreCircleStyle = {
@@ -177,9 +177,9 @@ const scoreCircleStyle = {
 };
 
 const sentimentLabelStyle = {
-    fontSize: '22px',
+    fontSize: '17px',
     fontWeight: '900',
-    letterSpacing: '1px',
+    letterSpacing: '0.5px',
     lineHeight: '1.2'
 };
 
@@ -203,8 +203,8 @@ const metricPillStyle = {
     flexDirection: 'column',
     alignItems: 'center',
     background: 'rgba(255,255,255,0.03)',
-    padding: '18px 12px',
-    borderRadius: '16px',
+    padding: '12px 8px',
+    borderRadius: '12px',
     border: '1px solid rgba(255,255,255,0.08)',
     transition: 'all 0.3s ease',
     cursor: 'default'
@@ -220,7 +220,7 @@ const liquidityBoxStyle = {
 };
 
 const liquidityLabelStyle = {
-    fontSize: '16px',
+    fontSize: '15px',
     fontWeight: '900',
     color: '#EAECEF',
     fontFamily: 'Roboto Mono, monospace'
@@ -293,7 +293,7 @@ const summaryLabelStyle = {
 };
 
 const summaryTextStyle = {
-    fontSize: '15px',
+    fontSize: '14px',
     color: '#EAECEF',
     lineHeight: '1.7',
     whiteSpace: 'pre-line',

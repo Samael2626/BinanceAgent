@@ -1,4 +1,7 @@
-from .base_strategy import BaseStrategy
+try:
+    from .base_strategy import BaseStrategy
+except ImportError:
+    from strategies.base_strategy import BaseStrategy
 from typing import Dict, Any
 
 
@@ -24,6 +27,28 @@ class RSIReboundStrategy(BaseStrategy):
         vol_sma = indicators.get('vol_sma', 0)
         current_vol = indicators.get('current_vol', 0)
 
+        # ========== ENHANCED PRE-EVALUATION LOGGING ==========
+        self.log_decision(
+            f"[EVAL BUY] Price=${current_price:.2f} | RSI={rsi:.1f} | "
+            f"Fast EMA={fast_ema:.2f} | Trend EMA={trend_ema:.2f} | Vol={current_vol:.0f}/{vol_sma:.0f}",
+            print
+        )
+
+        # ========== INDICATOR VALIDATION (CRITICAL FIX) ==========
+        # Si los indicadores son inválidos (0 o negativos), rechazar por seguridad
+        if settings.get('enable_trend_filter', True):
+            if trend_ema <= 0:
+                self.log_decision(
+                    f"🚫 BUY BLOCKED: Invalid or uninitialized Trend EMA ({trend_ema:.2f})", print)
+                return False
+
+        if settings.get('enable_fast_ema', True):
+            if fast_ema <= 0:
+                self.log_decision(
+                    f"🚫 BUY BLOCKED: Invalid or uninitialized Fast EMA ({fast_ema:.2f})", print)
+                return False
+
+        # ========== ORIGINAL FILTERS ==========
         # 1. RSI Condition (Primary)
         if rsi >= buy_threshold:
             return False
@@ -32,83 +57,31 @@ class RSIReboundStrategy(BaseStrategy):
         if settings.get('enable_fast_ema', True):
             if current_price < fast_ema:
                 self.log_decision(
-                    f"BUY SKIPPED: Price ({current_price:.2f}) below Fast EMA ({fast_ema:.2f}) - No confirmation.", print)
+                    f"❌ BUY SKIPPED: Price ({current_price:.2f}) below Fast EMA ({fast_ema:.2f}) - No confirmation.", print)
                 return False
 
-        # 3. Optional Quantitative Filters (Toggleable from Panel)
+        # 3. Trend Filter (EMA 200)
         if settings.get('enable_trend_filter', True):
             if current_price < trend_ema:
                 self.log_decision(
-                    f"BUY SKIPPED: Price ({current_price:.2f}) below EMA 200 ({trend_ema:.2f})", print)
+                    f"❌ BUY SKIPPED: Price ({current_price:.2f}) below EMA 200 ({trend_ema:.2f}) - Bearish trend.", print)
                 return False
 
+        # 4. Volume Filter
         if settings.get('enable_vol_filter', True):
             if current_vol <= vol_sma:
                 self.log_decision(
-                    f"BUY SKIPPED: Low volume ({current_vol:.2f} <= SMA {vol_sma:.2f})", print)
+                    f"❌ BUY SKIPPED: Low volume ({current_vol:.2f} <= SMA {vol_sma:.2f})", print)
                 return False
 
         self.log_decision(
-            f"BUY SIGNAL CONFIRMED: RSI({rsi:.1f}) < {buy_threshold} (Filters passed/skipped)", print)
+            f"✅ BUY SIGNAL CONFIRMED: RSI({rsi:.1f}) < {buy_threshold} | All filters PASSED", print)
         return True
 
     def check_sell_signal(self, indicators: Dict[str, Any], settings: Dict[str, Any], state: Dict[str, Any]) -> bool:
-        rsi = indicators.get('rsi', 50)
-        sell_threshold = settings.get('sell_rsi', 75)  # Default updated to 75
-        current_price = state.get('current_price', 0)
-        entry_price = state.get('entry_price', 0)
-
-        if entry_price <= 0:
-            return False
-
-        # 1. RSI Exit (Oversold exhaustion)
-        if rsi > sell_threshold:
-            self.log_decision(
-                f"SELL SIGNAL: RSI({rsi:.1f}) > {sell_threshold}", print)
-            return True
-
-        # 2. Risk Management (SL/TP)
-        sl_pct = settings.get('stop_loss_pct', 3.2)
-        if sl_pct > 0:
-            sl_price = entry_price * (1 - sl_pct / 100)
-            if current_price <= sl_price:
-                self.log_decision(
-                    f"SELL SIGNAL: Stop Loss triggered @ {current_price:.2f}", print)
-                return True
-
-        # Dynamic Take Profit (ATR) vs Fixed %
-        if settings.get('enable_atr_tp', False):
-            atr = indicators.get('atr', 0)
-            atr_mult = settings.get('atr_tp_multiplier', 2.0)
-
-            if atr > 0:
-                tp_price = entry_price + (atr * atr_mult)
-                # Sanity: TP must be above entry
-                if tp_price <= entry_price:
-                    tp_price = entry_price * 1.01
-
-                if current_price >= tp_price:
-                    self.log_decision(
-                        f"SELL SIGNAL: Dynamic ATR TP triggered @ {current_price:.2f} (ATR: {atr:.2f}, Mult: {atr_mult})", print)
-                    return True
-            else:
-                # Fallback to fixed if ATR missing
-                tp_pct = settings.get('take_profit_pct', 1.3)
-                if tp_pct > 0:
-                    tp_price = entry_price * (1 + tp_pct / 100)
-                    if current_price >= tp_price:
-                        self.log_decision(
-                            f"SELL SIGNAL: Fixed TP (Fallback) triggered @ {current_price:.2f}", print)
-                        return True
-
-        else:
-            # Standard Fixed % TP
-            tp_pct = settings.get('take_profit_pct', 1.3)
-            if tp_pct > 0:
-                tp_price = entry_price * (1 + tp_pct / 100)
-                if current_price >= tp_price:
-                    self.log_decision(
-                        f"SELL SIGNAL: Take Profit triggered @ {current_price:.2f}", print)
-                    return True
-
-        return False
+        """
+        Standardized Sell Signal using BaseStrategy's exit logic.
+        (SL, TP, RSI Glide Trailing)
+        """
+        # We rely 100% on the standardized exit logic for this strategy
+        return self.check_standard_exits(indicators, settings, state)

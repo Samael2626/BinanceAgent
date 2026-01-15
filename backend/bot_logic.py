@@ -17,7 +17,7 @@ from .indicators import calculate_indicators
 from .strategies.rsi_rebound import RSIReboundStrategy
 from .strategies.breakout_volume import BreakoutVolumeStrategy
 from .strategies.smart_scalper import SmartScalperStrategy
-from .strategies.smart_scalper import SmartScalperStrategy
+
 from .predictive_modules import PredictiveEngine
 from .services.market_data import MarketDataService
 
@@ -83,6 +83,8 @@ class BinanceBot:
         self.trailing_enabled = False  # FORCE DISABLED BY DEFAULT
         self.trailing_stop_pct = float(self.db.get_setting(
             "trailing_stop_pct", 1.0, user_id=user_id))
+        self.rsi_trailing_pct = float(self.db.get_setting(
+            "rsi_trailing_pct", 0.8, user_id=user_id))  # RSI Glide/Profit Step trailing %
         self.sniper_mode = False  # FORCE DISABLED BY DEFAULT
         self.dca_enabled = self.db.get_state(
             "dca_enabled", False, user_id=user_id)
@@ -502,15 +504,27 @@ class BinanceBot:
                         self._update_account_balances()
 
                         # Zero Residue Sync: If Binance says crypto_balance is ~0, but we think we have a position, RESET.
+                        # SAFETY FIX: This was too aggressive. Sometimes API returns 0 momentarily or partial fills cause desync.
+                        # Only reset if we are REALLY sure. For now, let's disable the auto-reset to prevent "Ghost Exits".
+                        # Instead of resetting, we just warn.
                         current_notional = self.crypto_balance * \
                             (self.current_price if self.current_price > 0 else 1)
+
                         if self.accumulated_qty > 0 and current_notional < 1.0:
-                            self._log(
-                                f"🔄 Sync Reset: Real balance too low ({current_notional:.2f} USDT). Clearing ghost position.", "DEBUG")
-                            self._reset_position_state()
+                            # self._log(f"🔄 Sync Warning: Internal Qty {self.accumulated_qty} but Binance Balance {self.crypto_balance}. Desync?", "DEBUG")
+                            # Don't auto-reset for now to avoid accidental position clearing.
+                            pass
 
                         if self.current_price > 0:
                             self._update_equity()
+
+                            # Update Highest Price for Trailing Stop logic
+                            if self.accumulated_qty > 0:
+                                if self.highest_price == 0 or self.current_price > self.highest_price:
+                                    self.highest_price = self.current_price
+                                    self.db.save_state(self._get_scoped_key(
+                                        "highest_price"), self.highest_price, user_id=self.user_id)
+
                 except Exception as e:
                     self._log(f"PnL/Sync Error: {e}", "ERROR")
 
@@ -622,7 +636,20 @@ class BinanceBot:
         print(
             f"Open Position: {bold}{str(self.accumulated_qty > 0).upper()}{reset}")
         print(f"Last Buy Price: {self.entry_price:.2f}")
-        print(f"Net PnL: {pnl_color}{self.pnl:+.4f} USDT{reset}")
+        if self.accumulated_qty > 0:
+            print(f"Highest Price: {self.highest_price:.2f} (Trail Active)")
+
+            # Position PnL (Unrealized)
+            pos_val = self.accumulated_qty * self.current_price
+            entry_val = self.accumulated_qty * self.entry_price
+            unrealized_pnl = pos_val - entry_val
+            upnl_color = green if unrealized_pnl >= 0 else red
+            upnl_pct = (unrealized_pnl / entry_val *
+                        100) if entry_val > 0 else 0
+            print(
+                f"Current Pos PnL: {upnl_color}{unrealized_pnl:+.4f} USDT ({upnl_pct:+.2f}%){reset}")
+
+        print(f"Session PnL: {pnl_color}{self.pnl:+.4f} USDT{reset}")
         print(f"Sniper Mode: {'ENABLED' if self.sniper_mode else 'DISABLED'}")
         print(
             f"Trailing: {'ENABLED' if self.trailing_enabled else 'DISABLED'}")
@@ -667,6 +694,19 @@ class BinanceBot:
         if self.accumulated_qty > 0:
             sell_sig_checked = strategy.check_sell_signal(
                 indicators, settings, state)
+
+            # DCA / RE-BUY LOGIC (Step Logic)
+            # Only if DCA is enabled, we have room for more orders, and we are not in Sniper Mode
+            if self.dca_enabled and self.position_orders < self.max_dca_orders and not self.sniper_mode:
+                # Check price step drop
+                step_price = self.last_buy_price * \
+                    (1 - self.dca_step_pct / 100)
+                if self.current_price <= step_price:
+                    # Optional: Add RSI filter to DCA? (e.g. only DCA if RSI is lowish)
+                    # For now, pure Price Step as requested by "Logic of Steps"
+                    self._log(
+                        f"📉 DCA Step Reached: Price {self.current_price:.2f} <= Limit {step_price:.2f} (-{self.dca_step_pct}%)", "INFO")
+                    buy_sig_checked = True
         else:
             # MUTUAL EXCLUSION RULE (Optional): No operar BTC y SOL al mismo tiempo.
             is_blocked_by_exclusion = False
@@ -695,17 +735,25 @@ class BinanceBot:
 
         # 3. Execution
         if sell_sig_checked:
-            self._log(
-                f"📉 SEÑAL DE VENTA DETECTADA por {strategy.name}", "INFO")
-            qty_to_sell = self._calculate_sell_qty(self.crypto_balance)
-            _, _ = self._place_sell_order(
-                self.symbol, qty_to_sell, self.current_price, f"{strategy.name}-SELL")
+            if self.enable_selling:
+                self._log(
+                    f"📉 SEÑAL DE VENTA DETECTADA por {strategy.name}", "INFO")
+                qty_to_sell = self._calculate_sell_qty(self.crypto_balance)
+                _, _ = self._place_sell_order(
+                    self.symbol, qty_to_sell, self.current_price, f"{strategy.name}-SELL")
+            else:
+                self._log(
+                    f"📉 SEÑAL DE VENTA DETECTADA pero 'enable_selling' es False.", "WARNING")
 
         elif buy_sig_checked:
-            self._log(
-                f"🚀 SEÑAL DE COMPRA DETECTADA por {strategy.name}", "INFO")
-            _, _ = self._place_buy_order(self.symbol, self.trade_qty, self.current_price, f"{strategy.name}-BUY",
-                                         is_quote=(self.trade_qty_type == "quote"))
+            if self.enable_buying:
+                self._log(
+                    f"🚀 SEÑAL DE COMPRA DETECTADA por {strategy.name}", "INFO")
+                _, _ = self._place_buy_order(self.symbol, self.trade_qty, self.current_price, f"{strategy.name}-BUY",
+                                             is_quote=(self.trade_qty_type == "quote"))
+            else:
+                self._log(
+                    f"🚀 SEÑAL DE COMPRA DETECTADA pero 'enable_buying' es False.", "WARNING")
 
     def _check_dca_allowed(self) -> bool:
         """Determines if a DCA buy order is allowed based on price distance."""
@@ -747,6 +795,15 @@ class BinanceBot:
             self.entry_price = new_val / new_qty if new_qty > 0 else actual_price
             self.accumulated_qty = new_qty
             self.position_orders += 1
+            self.open_position = True
+
+            # ✅ SENIOR FIX: Reset highest_price on every BUY (DCA or Initial)
+            # This ensures trailing only starts from the new (potentially adjusted) price level
+            # and prevents using historical peaks that are no longer relevant to the new entry.
+            self.highest_price = 0.0
+            self.last_buy_price = actual_price
+            self._log(
+                f"📥 Position Updated ({side} {strategy}): Entry=${self.entry_price:.2f} | Qty={self.accumulated_qty:.6f}", "INFO")
         else:
             # Update accumulated quantity after a SELL
             self.accumulated_qty = max(
@@ -761,7 +818,7 @@ class BinanceBot:
                         f"🧹 Position cleared: Remaining {self.accumulated_qty:.8f} is Dust/Fees.", "INFO")
 
                 self._reset_position_state()
-                # Ensure balance sync
+                # Ensure balance sync is immediate after a total sale
                 self._update_account_balances()
 
         # Persist State
@@ -819,10 +876,20 @@ class BinanceBot:
 
             # Final check: do we actually have the balance for this adjusted quantity?
             total_required = quantity if is_quote else quantity * price
+
+            # Auto-clamp if slightly over balance (Float precision fix)
             if total_required > self.balance:
-                err_msg = f"Insufficient balance for order: Required {total_required:.2f} USDT, have {self.balance:.2f} USDT"
-                self._log(f"❌ {err_msg}", "ERROR")
-                return None, err_msg
+                if is_quote:
+                    self._log(
+                        f"⚠️ Reduced Buy Qty from {quantity} to {self.balance} (Max Balance)", "DEBUG")
+                    quantity = self.balance
+                    total_required = quantity
+                else:
+                    # For base asset, we can't easily adjust without recalc step size.
+                    # If margin caused it, fail.
+                    err_msg = f"Insufficient balance for order: Required {total_required:.2f} USDT, have {self.balance:.2f} USDT"
+                    self._log(f"❌ {err_msg}", "ERROR")
+                    return None, err_msg
 
             trade = self.client.place_order(
                 symbol, "BUY", quantity, quote_order_qty=quantity if is_quote else None)
@@ -1020,14 +1087,30 @@ class BinanceBot:
 
     def manual_buy(self, custom_qty=None, is_quote=None):
         try:
-            # Si no se especifica, tomar por defecto segun configuracion
+            # Refresh balance to avoid desync
+            self._update_account_balances()
+
             if is_quote is None:
                 # If custom_qty is provided (Manual UI override), assume Base Quantity (Crypto)
-                # because the UI calculates and sends the amount in crypto.
+                # because the UI might default to that? No, usually UI sends quote for "Buy Amount".
+                # Standardizing: If custom_qty is passed, we check the type setting or infer?
+                # For manual buys, it's safer to treat it based on the flag passed or config.
                 if custom_qty is not None:
-                    is_quote = False
-                else:
-                    is_quote = (self.trade_qty_type == "quote")
+                    # If specific quantity passed, rely on is_quote argument or default to True if implied?
+                    # Actually, let's trust the default logic OR the argument.
+                    pass
+                is_quote = (self.trade_qty_type == "quote")
+
+            # SAFETY: If buying in USDT (quote) and custom_qty is close to or > balance
+            if is_quote and custom_qty:
+                if custom_qty >= self.balance * 0.9999:
+                    self._log(
+                        f"⚠️ Clamping Manual Buy to Max Balance: {self.balance}", "DEBUG")
+                    custom_qty = self.balance
+
+            # Additional clamp for safety
+            if is_quote and custom_qty and custom_qty > self.balance:
+                custom_qty = self.balance
 
             self._log(
                 f"🛒 Manual BUY requested: {custom_qty or self.trade_qty} (is_quote={is_quote})", "INFO")
@@ -1073,14 +1156,22 @@ class BinanceBot:
 
     def disconnect(self):
         """Cleanly stop all background threads and WebSockets."""
+        self.stop()
         self.monitor_active = False
+
+        # Stop sockets
         if self.client:
             self.client.stop_all_sockets()
         if self.data_client and self.data_client != self.client:
             self.data_client.stop_all_sockets()
+
+        self.client = None
+        self.data_client = None
+
+        # Clear credentials from state (Security)
+        self.db.save_state("credentials", None, user_id=self.user_id)
+
         self._log("🔌 Bot disconnected and WebSockets closed.", "INFO")
-        self.db.save_state("is_running", "False", user_id=self.user_id)
-        self._log("🛑 Bot detenido manualmente", "INFO")
         return {"status": "stopped"}
 
     def get_status(self):
@@ -1118,7 +1209,8 @@ class BinanceBot:
             "rsi_alert_buy_urgent": self.rsi_alert_buy_urgent, "rsi_alert_buy_normal": self.rsi_alert_buy_normal,
             "rsi_alert_sell_urgent": self.rsi_alert_sell_urgent, "rsi_alert_sell_normal": self.rsi_alert_sell_normal,
             "enable_fast_ema": self.enable_fast_ema, "fast_ema_len": self.fast_ema_len,
-            "ema_length": self.ema_length, "macd_signal": self.macd_signal_period
+            "ema_length": self.ema_length, "macd_signal": self.macd_signal_period,
+            "rsi_trailing_pct": self.rsi_trailing_pct
         }
 
     def update_settings(self, settings: dict):
@@ -1217,31 +1309,10 @@ class BinanceBot:
 
         return {"status": "success"}
 
-    def disconnect(self):
-        """Disconnects the bot and clears credentials."""
-        self.stop()
-
-        # Stop all sockets for both clients to ensure clean shutdown
-        if self.data_client:
-            self.data_client.stop_all_sockets()
-
-        if self.client and self.client != self.data_client:
-            self.client.stop_all_sockets()
-
-        self.client = None
-        self.data_client = None
-        self.is_running = False
-        self.db.save_state("credentials", None, user_id=self.user_id)
-        return {"status": "disconnected"}
-
     def reset_position(self):
-        """Resets the accumulated position state for the current symbol."""
+        """Resets the accumulated position state for the current symbol (User requested)."""
         with self.lock:
-            self.entry_price = self.accumulated_qty = 0.0
-            self.position_orders = 0
-            for k in ["entry_price", "position_orders", "accumulated_qty"]:
-                self.db.save_state(self._get_scoped_key(
-                    k), 0.0 if "qty" in k or "price" in k else 0, user_id=self.user_id)
+            self._reset_position_state()
         return {"status": "success"}
 
     def reset_pnl(self):

@@ -6,12 +6,24 @@ const AccordionItem = ({ title, isOpen, onToggle, children, icon, helpText }) =>
   const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => {
-    if (isOpen) {
-      setHeight(`${contentRef.current.scrollHeight}px`);
-    } else {
+    if (!isOpen) {
       setHeight('0px');
+      return;
     }
-  }, [isOpen, children]);
+
+    // Use ResizeObserver for dynamic content height
+    const observer = new ResizeObserver(() => {
+      if (contentRef.current && isOpen) {
+        setHeight(`${contentRef.current.scrollHeight}px`);
+      }
+    });
+
+    if (contentRef.current) {
+      observer.observe(contentRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, [isOpen]);
 
   return (
     <div className="accordion-item" style={{ 

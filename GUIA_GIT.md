@@ -39,4 +39,4 @@ Cuando termines una nueva mejora:
 ---
 
 > [!TIP]
-> **Versión 1.7:** He etiquetado este estado actual como la versión 1.7 oficial del bot. ¡Felicidades por llegar hasta aquí!
+> **Versión 2.0:** Hemos alcanzado el hito de la versión 2.0. Esta versión marca el paso a una arquitectura modular profesional y un diseño premium.

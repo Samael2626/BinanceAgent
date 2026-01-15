@@ -73,19 +73,19 @@ const RSIMonitorPanel = () => {
             return (
               <div key={item.symbol} className="rsi-row">
                  {/* Symbol */}
-                 <div style={{ width: '60px', fontWeight: 'bold' }}>
+                 <div style={{ width: '45px', fontWeight: '900', fontSize: '13px', color: '#EAECEF' }}>
                     {item.symbol.replace('USDT', '')}
                  </div>
                  
                  {/* Progress Bar */}
-                 <div style={{ flex: 1, margin: '0 15px', height: '6px', background: 'var(--panel-border)', borderRadius: '3px', overflow: 'hidden' }}>
-                    <div style={{ width: `${item.rsi}%`, height: '100%', background: status.color, transition: 'width 0.5s ease' }} />
+                 <div className="progress-bg">
+                    <div className="progress-fill" style={{ width: `${item.rsi}%`, background: status.color, color: status.color }} />
                  </div>
 
                  {/* Value & Status */}
-                 <div style={{ textAlign: 'right', minWidth: '80px' }}>
-                    <div style={{ fontWeight: 'bold', color: status.color }}>{item.rsi.toFixed(1)}</div>
-                    <div style={{ fontSize: '0.7rem', color: 'var(--text-sec)' }}>{status.text}</div>
+                 <div style={{ textAlign: 'right', minWidth: '65px' }}>
+                    <div style={{ fontWeight: '950', color: status.color, fontSize: '14px', textShadow: `0 0 10px ${status.color}44` }}>{item.rsi.toFixed(1)}</div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-sec)', textTransform: 'uppercase', fontWeight: '700' }}>{status.text}</div>
                  </div>
               </div>
             )

@@ -178,10 +178,12 @@ const MarketChart = ({ data, symbol, prediction, entryPrice }) => {
              if (chartContainerRef.current) chart.applyOptions({ width: chartContainerRef.current.clientWidth });
              if (rsiContainerRef.current) rsiChart.applyOptions({ width: rsiContainerRef.current.clientWidth });
          };
-         window.addEventListener('resize', handleResize);
+
+         const observer = new ResizeObserver(handleResize);
+         if (chartContainerRef.current) observer.observe(chartContainerRef.current);
  
          return () => {
-             window.removeEventListener('resize', handleResize);
+             observer.disconnect();
              chart.remove();
              rsiChart.remove();
          };
@@ -290,21 +292,23 @@ const MarketChart = ({ data, symbol, prediction, entryPrice }) => {
              
              // 3. Traps (Markers)
              try {
-                 if (prediction.traps && prediction.traps.length > 0) {
-                     const lastTime = candles[candles.length - 1]?.time;
-                     if (lastTime) {
-                         const markers = [];
-                         prediction.traps.forEach(trap => {
-                             if (trap === 'BULL_TRAP') {
-                                 markers.push({ time: lastTime, position: 'aboveBar', color: '#F6465D', shape: 'arrowDown', text: 'Bull Trap' });
-                             } else if (trap === 'BEAR_TRAP') {
-                                 markers.push({ time: lastTime, position: 'belowBar', color: '#0ECB81', shape: 'arrowUp', text: 'Bear Trap' });
-                             }
-                         });
-                         candleSeriesRef.current.setMarkers(markers);
+                 if (candleSeriesRef.current && typeof candleSeriesRef.current.setMarkers === 'function') {
+                     if (prediction.traps && prediction.traps.length > 0) {
+                         const lastTime = candles[candles.length - 1]?.time;
+                         if (lastTime) {
+                             const markers = [];
+                             prediction.traps.forEach(trap => {
+                                 if (trap === 'BULL_TRAP') {
+                                     markers.push({ time: lastTime, position: 'aboveBar', color: '#F6465D', shape: 'arrowDown', text: 'Bull Trap' });
+                                 } else if (trap === 'BEAR_TRAP') {
+                                     markers.push({ time: lastTime, position: 'belowBar', color: '#0ECB81', shape: 'arrowUp', text: 'Bear Trap' });
+                                 }
+                             });
+                             candleSeriesRef.current.setMarkers(markers);
+                         }
+                     } else {
+                         candleSeriesRef.current.setMarkers([]);
                      }
-                 } else {
-                     candleSeriesRef.current.setMarkers([]);
                  }
              } catch(err) {
                  console.warn("Error drawing markers:", err);
@@ -332,33 +336,46 @@ const MarketChart = ({ data, symbol, prediction, entryPrice }) => {
     return (
         <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: '5px' }}>
             {/* Header Info */}
-            <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 20, fontSize: '12px', fontFamily: 'Roboto, sans-serif', display: 'flex', gap: '15px', pointerEvents: 'none', color: '#848E9C' }}>
+            {/* Header Info - Two Row Layout to prevent overlap */}
+            <div style={{ 
+                position: 'absolute', top: 10, left: 10, zIndex: 20, 
+                fontSize: '11px', fontFamily: 'Inter, sans-serif', 
+                display: 'flex', flexDirection: 'column', gap: '8px', 
+                pointerEvents: 'none', color: '#848E9C' 
+            }}>
+                 {/* Row 1: Symbol & Score */}
                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <span style={{ color: '#EAECEF', fontWeight: 'bold', fontSize: '14px' }}>{symbol}</span>
+                    <span style={{ color: '#EAECEF', fontWeight: '950', fontSize: '13px', letterSpacing: '0.05em' }}>{symbol}</span>
                     {prediction && prediction.market_score !== undefined && (
                         <div style={{ 
                             background: prediction.market_score > 60 ? 'rgba(14, 203, 129, 0.2)' : prediction.market_score < 30 ? 'rgba(246, 70, 93, 0.2)' : 'rgba(255, 255, 255, 0.1)',
                             border: `1px solid ${prediction.market_score > 60 ? '#0ECB81' : prediction.market_score < 30 ? '#F6465D' : '#848E9C'}`,
                             borderRadius: '4px',
-                            padding: '2px 6px',
+                            padding: '2px 8px',
                             color: prediction.market_score > 60 ? '#0ECB81' : prediction.market_score < 30 ? '#F6465D' : '#EAECEF',
-                            fontWeight: 'bold'
+                            fontWeight: '900',
+                            fontSize: '10px'
                         }}>
-                            Score: {prediction.market_score}/100
+                            SCORE: {prediction.market_score}/100
                         </div>
                     )}
                 </div>
-                {/* Data Display */}
+
+                {/* Row 2: Price Data & Indicators */}
                 {displayData.close && (
-                    <>
-                        <span>O: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.open}</span></span>
-                        <span>H: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.high}</span></span>
-                        <span>L: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.low}</span></span>
-                        <span>C: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81' }}>{displayData.close}</span></span>
-                        {displayData.fastEma && <span style={{ color: '#FCD535' }}>EMA Rápida: {displayData.fastEma.toFixed(2)}</span>}
-                        {displayData.trendEma && <span style={{ color: '#3B82F6' }}>Trend EMA (Larga): {displayData.trendEma.toFixed(2)}</span>}
-                        {displayData.rsi && <span style={{ color: '#9370DB' }}>RSI: {displayData.rsi.toFixed(2)}</span>}
-                    </>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', background: 'rgba(0,0,0,0.3)', padding: '4px 8px', borderRadius: '4px', backdropFilter: 'blur(4px)' }}>
+                        <div style={{ display: 'flex', gap: '8px', borderRight: '1px solid rgba(255,255,255,0.1)', paddingRight: '8px' }}>
+                            <span>O: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81', fontWeight: '600' }}>{displayData.open}</span></span>
+                            <span>H: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81', fontWeight: '600' }}>{displayData.high}</span></span>
+                            <span>L: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81', fontWeight: '600' }}>{displayData.low}</span></span>
+                            <span>C: <span style={{ color: displayData.open > displayData.close ? '#F6465D' : '#0ECB81', fontWeight: '600' }}>{displayData.close}</span></span>
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                            {displayData.fastEma && <span style={{ color: '#FCD535' }}>EMA Fast: <b style={{color: '#fff'}}>{displayData.fastEma.toFixed(2)}</b></span>}
+                            {displayData.trendEma && <span style={{ color: '#3B82F6' }}>Trend EMA: <b style={{color: '#fff'}}>{displayData.trendEma.toFixed(2)}</b></span>}
+                            {displayData.rsi && <span style={{ color: '#9370DB' }}>RSI: <b style={{color: '#fff'}}>{displayData.rsi.toFixed(2)}</b></span>}
+                        </div>
+                    </div>
                 )}
             </div>
 

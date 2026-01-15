@@ -1,5 +1,5 @@
 """
-Binance Trading Bot - Stable Version 1.9.0
+Binance Trading Bot - Stable Version 2.0.0
 (c) 2026 - Samael26/BinanceAgent
 Architecture: FastAPI / React
 """
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
 
 # Initialize App
 app = FastAPI(title="Binance Trading Bot API",
-              version="1.9.0", lifespan=lifespan)
+              version="2.0.0", lifespan=lifespan)
 
 # Configure CORS
 app.add_middleware(
@@ -224,7 +224,7 @@ def get_current_user_info(user: dict = Depends(get_current_user)):
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "Binance Trading Bot Backend v1.8.2 Stable - Multi-User"}
+    return {"status": "online", "message": "Binance Trading Bot Backend v2.0.0 Stable - Multi-User"}
 
 
 @app.get("/health")
@@ -270,7 +270,8 @@ def manual_buy(payload: dict = Body(default=None), user: dict = Depends(get_curr
     if not bot:
         raise HTTPException(status_code=404, detail="Bot no inicializado")
     custom_qty = payload.get("quantity") if payload else None
-    return bot.manual_buy(custom_qty=custom_qty)
+    is_quote = payload.get("is_quote") if payload else None
+    return bot.manual_buy(custom_qty=custom_qty, is_quote=is_quote)
 
 
 @app.post("/api/sell")

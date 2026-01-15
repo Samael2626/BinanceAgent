@@ -90,7 +90,7 @@ class BinanceWrapper:
 
     def get_symbol_info(self, symbol: str) -> Optional[Dict]:
         """Fetches symbol info with basic caching (5 min)."""
-        now = asyncio.get_event_loop().time() if self._loop else time.time()
+        now = time.time()
 
         if symbol in self._symbol_info_cache:
             info, expiry = self._symbol_info_cache[symbol]
@@ -231,41 +231,52 @@ class BinanceWrapper:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-            while not stop_event.is_set():  # Outer loop for reconnection
-                try:
-                    async def main():
-                        client = Client(
-                            self.api_key, self.api_secret, testnet=self.testnet)
-                        client.https_proxy = None
-                        bsm = BinanceSocketManager(client)
-                        async with bsm.kline_socket(symbol=symbol, interval=interval) as stream:
-                            while not stop_event.is_set():
-                                try:
-                                    msg = await asyncio.wait_for(stream.recv(), timeout=2.0)
-                                    if msg and 'k' in msg:
-                                        callback(msg)
-                                except asyncio.TimeoutError:
-                                    continue
+            try:
+                while not stop_event.is_set():  # Outer loop for reconnection
+                    try:
+                        async def main():
+                            client = Client(
+                                self.api_key, self.api_secret, testnet=self.testnet)
+                            client.https_proxy = None
+                            bsm = BinanceSocketManager(client)
+                            async with bsm.kline_socket(symbol=symbol, interval=interval) as stream:
+                                while not stop_event.is_set():
+                                    try:
+                                        msg = await asyncio.wait_for(stream.recv(), timeout=2.0)
+                                        if msg and 'k' in msg:
+                                            callback(msg)
+                                    except asyncio.TimeoutError:
+                                        continue
 
-                    loop.run_until_complete(main())
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    if stop_event.is_set():
+                        loop.run_until_complete(main())
+                    except asyncio.CancelledError:
                         break
+                    except Exception as e:
+                        if stop_event.is_set():
+                            break
 
-                    # Log error safely
-                    error_msg = str(e)
-                    print(
-                        f"Kline Socket connection failed/closed: {error_msg}. Reconnecting in 5s...", flush=True)
+                        # Log error safely
+                        error_msg = str(e)
+                        # Suppress reconnection errors if already shutting down
+                        if "cannot schedule new futures after shutdown" in error_msg:
+                            break
 
-                    # Stop retrying if it's a fatal credential error
-                    if "code=-2015" in error_msg or "code=-1100" in error_msg:
                         print(
-                            "❌ Fatal API Error detected in Kline Socket. Stopping reconnect loop.", flush=True)
-                        break
+                            f"Kline Socket connection failed/closed: {error_msg}. Reconnecting in 5s...", flush=True)
 
-                    stop_event.wait(5)
+                        # Stop retrying if it's a fatal credential error
+                        if "code=-2015" in error_msg or "code=-1100" in error_msg:
+                            print(
+                                "❌ Fatal API Error detected in Kline Socket. Stopping reconnect loop.", flush=True)
+                            break
+
+                        stop_event.wait(5)
+            finally:
+                # Properly close the loop to prevent "cannot schedule" errors
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
         t = threading.Thread(target=run_socket, daemon=True)
         t.start()
@@ -283,40 +294,51 @@ class BinanceWrapper:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-            while not stop_event.is_set():  # Outer loop for reconnection
-                try:
-                    async def main():
-                        client = Client(
-                            self.api_key, self.api_secret, testnet=self.testnet)
-                        client.https_proxy = None
-                        bsm = BinanceSocketManager(client)
-                        async with bsm.user_socket() as stream:
-                            while not stop_event.is_set():
-                                try:
-                                    msg = await asyncio.wait_for(stream.recv(), timeout=2.0)
-                                    callback(msg)
-                                except asyncio.TimeoutError:
-                                    continue
+            try:
+                while not stop_event.is_set():  # Outer loop for reconnection
+                    try:
+                        async def main():
+                            client = Client(
+                                self.api_key, self.api_secret, testnet=self.testnet)
+                            client.https_proxy = None
+                            bsm = BinanceSocketManager(client)
+                            async with bsm.user_socket() as stream:
+                                while not stop_event.is_set():
+                                    try:
+                                        msg = await asyncio.wait_for(stream.recv(), timeout=2.0)
+                                        callback(msg)
+                                    except asyncio.TimeoutError:
+                                        continue
 
-                    loop.run_until_complete(main())
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    if stop_event.is_set():
+                        loop.run_until_complete(main())
+                    except asyncio.CancelledError:
                         break
+                    except Exception as e:
+                        if stop_event.is_set():
+                            break
 
-                    # Log error safely
-                    error_msg = str(e)
-                    print(
-                        f"User Socket connection failed/closed: {error_msg}. Reconnecting in 5s...", flush=True)
+                        # Log error safely
+                        error_msg = str(e)
+                        # Suppress reconnection errors if already shutting down
+                        if "cannot schedule new futures after shutdown" in error_msg:
+                            break
 
-                    # Stop retrying if it's a fatal credential error
-                    if "code=-2015" in error_msg or "code=-1100" in error_msg:
                         print(
-                            "❌ Fatal API Error detected in User Socket. Stopping reconnect loop.", flush=True)
-                        break
+                            f"User Socket connection failed/closed: {error_msg}. Reconnecting in 5s...", flush=True)
 
-                    stop_event.wait(5)
+                        # Stop retrying if it's a fatal credential error
+                        if "code=-2015" in error_msg or "code=-1100" in error_msg:
+                            print(
+                                "❌ Fatal API Error detected in User Socket. Stopping reconnect loop.", flush=True)
+                            break
+
+                        stop_event.wait(5)
+            finally:
+                # Properly close the loop to prevent "cannot schedule" errors
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
         t = threading.Thread(target=run_socket, daemon=True)
         t.start()

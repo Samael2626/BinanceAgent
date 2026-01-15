@@ -379,7 +379,19 @@ function App() {
   }
 
   const confirmTrade = () => {
-    const qty = parseFloat(tradeAmount)
+    let qty;
+    let isQuote = false;
+
+    if (tradeModalType === 'buy') {
+      // For BUY, we prefer using the USDT amount to avoid "Insufficient Balance" errors due to price drift
+      qty = parseFloat(tradeAmountUSDT);
+      isQuote = true;
+    } else {
+      // For SELL, we must use the Asset amount
+      qty = parseFloat(tradeAmount);
+      isQuote = false;
+    }
+
     if (!qty || qty <= 0) {
       addNotification('error', 'Por favor ingresa una cantidad válida')
       return
@@ -392,7 +404,7 @@ function App() {
     fetch(endpoint, {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ quantity: qty })
+      body: JSON.stringify({ quantity: qty, is_quote: isQuote })
     })
       .then(res => res.json())
       .then((data) => {

@@ -75,6 +75,7 @@ body {
   transition: background-color 0.4s ease, color 0.4s ease;
   padding: 1.5rem 2rem;
   -webkit-font-smoothing: antialiased;
+  font-size: 14px; /* Reducido 1px (base suele ser 15-16px) */
 }
 
 /* Typography */
@@ -103,9 +104,13 @@ h1 { color: var(--accent-primary); font-size: 1.5rem; }
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: 3fr 1.2fr; /* More space for chart (left), strictly controlled right column */
-  gap: 1.5rem;
+  grid-template-columns: 1.8fr 1.2fr; /* PRIORIDAD SIDEBAR: 60% vs 40% */
+  gap: 2.5rem; /* Máximo "aire" entre paneles para evitar fatiga visual */
   align-items: start;
+}
+
+.chart-column, .settings-column {
+  min-width: 0; 
 }
 
 @media (max-width: 1200px) {
@@ -116,10 +121,10 @@ h1 { color: var(--accent-primary); font-size: 1.5rem; }
 .card, .settings-section, .modal-content, .chart-card {
   background: var(--panel-bg);
   background-image: var(--panel-gradient);
-  border: 1px solid var(--panel-border);
+  border: 1px solid rgba(255, 255, 255, 0.05); /* Borde más sutil y elegante */
   border-radius: var(--radius-md);
-  padding: 1.5rem;
-  box-shadow: var(--shadow-soft);
+  padding: 1.8rem; /* Más espaciado interno */
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2); /* Sombra más premium */
   transition: var(--transition-fast);
 }
 
@@ -135,7 +140,7 @@ button {
   cursor: pointer;
   font-weight: 500;
   transition: var(--transition-fast);
-  font-size: 0.9rem;
+  font-size: 0.85rem; /* Reducido 1px */
 }
 
 .minimal-btn {
@@ -169,10 +174,10 @@ input, select {
   border: 1px solid var(--input-border);
   color: var(--text-main);
   border-radius: var(--radius-sm);
-  padding: 0.75rem;
+  padding: 0.65rem; /* Más compacto */
   width: 100%;
   box-sizing: border-box;
-  font-size: 0.9rem;
+  font-size: 0.85rem; /* Reducido 1px */
   transition: var(--transition-fast);
 }
 input:focus {
@@ -269,6 +274,7 @@ td {
 /* Modals */
 .modal-overlay {
   background: rgba(0,0,0,0.5);
+  -webkit-backdrop-filter: blur(5px);
   backdrop-filter: blur(5px);
   position: fixed; inset: 0;
   display: flex; justify-content: center; align-items: center; z-index: 1000;
@@ -289,16 +295,89 @@ td {
 ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-sec); }
 
-/* RSI List Specifics */ 
+/* Metrics Layouts */
+.metrics-large {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 15px;
+  margin-bottom: 20px;
+}
+
+.metric-box {
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-box label {
+  font-size: 11px; /* Reducido */
+  color: var(--text-sec);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.metric-box .value {
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.metric-box .change {
+  font-weight: 500;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.metric-box .change.up { color: var(--success); background: rgba(14, 203, 129, 0.1); }
+.metric-box .change.down { color: var(--danger); background: rgba(246, 70, 93, 0.1); }
+.metric-box .change.neutral { color: var(--text-sec); background: rgba(255, 255, 255, 0.05); }
+
+/* RSI List Majestic Overhaul */ 
 .rsi-list-container { 
     display: grid; 
-    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); /* Multi-column for compactness */
-    gap: 10px; 
+    grid-template-columns: repeat(4, 1fr); /* Exactamente 4 columnas para 2 filas */
+    gap: 12px; 
 }
+
 .rsi-row { 
-    display: flex; align-items: center; justify-content: space-between; 
-    padding: 8px 12px; 
-    background: var(--input-bg); 
-    border-radius: var(--radius-sm); 
-    border: 1px solid var(--input-border);
+    display: flex; 
+    align-items: center; 
+    justify-content: space-between; 
+    padding: 10px 14px; 
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%); 
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-radius: var(--radius-md); 
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    transition: all 0.3s ease;
+}
+
+.rsi-row:hover {
+    border-color: rgba(252, 213, 53, 0.3); /* Rayo de luz dorada al pasar */
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.5);
+}
+
+.rsi-row .progress-bg {
+    flex: 1; 
+    margin: 0 12px; 
+    height: 6px; 
+    background: rgba(255,255,255,0.05); 
+    border-radius: 3px; 
+    overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
+}
+
+.rsi-row .progress-fill {
+    height: 100%; 
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 0 10px currentColor; /* Resplandor dinámico */
 }

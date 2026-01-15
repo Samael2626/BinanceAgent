@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.0.0] - 2026-01-15
+
+### 🔥 Major Architectural Shift
+- **TradingEngine Core**: Complete refactoring of the bot's brain into a modular, service-oriented architecture.
+- **OrderManager**: Centralized order handling with strict "Zero Residue" enforcement and real-time Binance filter validation.
+- **MarketDataService**: Optimized data handling for consistent historical and real-time analysis.
+
+### 🧠 Trading Intelligence
+- **RSI Glide (Smart Trailing)**: New dynamic exit mechanism that follows upward trends and protects gains with institutional-grade precision.
+- **Advanced Filtering**: Added ADX Trend Strength and Lateralization filters to filter out noise and improve entry quality.
+- **Smart Matrix Integration**: Unified indicator processing for faster and more reliable decision making.
+
+### ✨ Premium UX/UI
+- **Majestic Dashboard**: Total redesign with glassmorphism effects, optimized grid spacing, and refined typography.
+- **Elegance Monitor**: High-end RSI monitor panel with 4-column grid and premium visual effects.
+- **Performance Optimization**: Smoother chart rendering and responsive layout adjustments.
+
+### 🛠 Stability & Reliability
+- **WebSocket Master**: Fixed shutdown race conditions and implemented high-resiliency connection management.
+- **State Integrity**: Guaranteed synchronization between internal bot state and real Binance balances.
+- **Multi-User Ready**: Hardened auth logic and session management.
+
+
 ## [1.9.0] - 2026-01-14
 
 ### Major Features
