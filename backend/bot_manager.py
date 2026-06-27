@@ -19,11 +19,14 @@ class BotManager:
             if user_id not in self.bots:
                 # Create new bot instance for this user
                 bot = BinanceBot(user_id=user_id)
-                # Set credentials
-                result = bot.set_credentials(api_key, api_secret, is_testnet)
-                if result.get("status") == "error":
-                    raise Exception(result.get(
-                        "message", "Failed to initialize bot"))
+
+                # BinanceBot restores saved credentials during construction when
+                # they exist. Avoid initializing sockets twice on login.
+                if not bot.client:
+                    result = bot.set_credentials(api_key, api_secret, is_testnet)
+                    if result.get("status") == "error":
+                        raise Exception(result.get(
+                            "message", "Failed to initialize bot"))
                 self.bots[user_id] = bot
 
             return self.bots[user_id]
