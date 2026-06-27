@@ -78,6 +78,48 @@ export const MarketSettings = ({ botStatus, updateSettings, showMarket, setShowM
           </div>
 
         {isProMode && (
+          <div style={{
+            marginBottom: '15px',
+            padding: '16px',
+            background: 'rgba(88,166,255,0.05)',
+            borderRadius: '12px',
+            border: '1px solid rgba(88,166,255,0.15)'
+          }}>
+            <label style={{ fontSize: '12px', color: '#58a6ff', fontWeight: '800', marginBottom: '12px', display: 'block' }}>
+              SCANNER AUTÓNOMO DE ACTIVOS
+            </label>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Rotación Automática</label>
+                <select
+                  className="login-input"
+                  value={botStatus.settings?.auto_asset_rotation ? 'on' : 'off'}
+                  onChange={(e) => updateSettings({ auto_asset_rotation: e.target.value === 'on' })}
+                  disabled={isUpdating}
+                >
+                  <option value="off">OFF</option>
+                  <option value="on">ON</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Intervalo Scanner (min)</label>
+                <input type="number" className="login-input" value={botStatus.settings?.rotation_interval_minutes || 15} onChange={(e) => updateSettings({ rotation_interval_minutes: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Score Mínimo Rotación</label>
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.min_rotation_score || 55.0} onChange={(e) => updateSettings({ min_rotation_score: e.target.value })} disabled={isUpdating} />
+              </div>
+              <div className="form-group">
+                <label>Watchlist</label>
+                <input type="text" className="login-input" value={botStatus.settings?.rotation_watchlist || ''} onChange={(e) => updateSettings({ rotation_watchlist: e.target.value })} disabled={isUpdating} placeholder="BTCUSDT,ETHUSDT,SOLUSDT" />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isProMode && (
          <div style={{ marginTop: '5px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '15px', background: 'rgba(255,255,255,0.03)', padding: '5px', borderRadius: '6px' }}>
             <label style={{ fontSize: '0.8rem', color: botStatus.mode === 'TESTNET' ? 'var(--text-dim)' : '#666', cursor: botStatus.mode === 'TESTNET' ? 'pointer' : 'not-allowed' }}>
                 Usar Datos Reales (Mainnet):
@@ -145,7 +187,7 @@ export const RiskSettings = ({ botStatus, updateSettings, showRisk, setShowRisk,
         </div>
         
         {/* DCA Section */}
-         <div style={{ marginTop: '10px', padding: '10px', background: 'rgba(31, 111, 235, 0.05)', borderRadius: '6px', border: '1px solid rgba(31, 111, 235, 0.1)' }}>
+           <div style={{ marginTop: '10px', padding: '10px', background: 'rgba(31, 111, 235, 0.05)', borderRadius: '6px', border: '1px solid rgba(31, 111, 235, 0.1)' }}>
             <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: '8px'}}>
                  <label style={{fontWeight:'bold', color: '#58a6ff', fontSize: '12px'}}>Estrategia DCA (Promedio) <HelpTooltip text="Si el precio baja, el bot compra más para bajar el precio promedio de entrada." /></label>
                  <button 
@@ -169,6 +211,110 @@ export const RiskSettings = ({ botStatus, updateSettings, showRisk, setShowRisk,
                 </div>
              )}
          </div>
+
+         {isProMode && (
+          <div style={{
+            marginTop: '15px',
+            padding: '16px',
+            background: 'rgba(88,166,255,0.05)',
+            borderRadius: '12px',
+            border: '1px solid rgba(88,166,255,0.15)'
+          }}>
+            <label style={{ fontSize: '12px', color: '#58a6ff', fontWeight: '800', marginBottom: '12px', display: 'block' }}>
+              MOTOR DE RIESGO AUTOMÁTICO
+            </label>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Sizing Automático</label>
+                <select
+                  className="login-input"
+                  value={botStatus.settings?.auto_position_sizing ? 'on' : 'off'}
+                  onChange={(e) => updateSettings({ auto_position_sizing: e.target.value === 'on' })}
+                  disabled={isUpdating}
+                >
+                  <option value="on">ON</option>
+                  <option value="off">OFF</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Riesgo por Trade (%)</label>
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.risk_per_trade_pct || 1.0} onChange={(e) => updateSettings({ risk_per_trade_pct: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Pérdida Diaria Máx. (%)</label>
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.max_daily_loss_pct || 5.0} onChange={(e) => updateSettings({ max_daily_loss_pct: e.target.value })} disabled={isUpdating} />
+              </div>
+              <div className="form-group">
+                <label>Racha Máx. Perdidas</label>
+                <input type="number" className="login-input" value={botStatus.settings?.max_consecutive_losses || 3} onChange={(e) => updateSettings({ max_consecutive_losses: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>ATR Stop Mult</label>
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.atr_stop_mult || 1.5} onChange={(e) => updateSettings({ atr_stop_mult: e.target.value })} disabled={isUpdating} />
+              </div>
+              <div className="form-group">
+                <label>Score Mínimo Compra</label>
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.min_market_score_to_buy || 45.0} onChange={(e) => updateSettings({ min_market_score_to_buy: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Cooldown (min)</label>
+                <input type="number" className="login-input" value={botStatus.settings?.cooldown_minutes || 10} onChange={(e) => updateSettings({ cooldown_minutes: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Kill Switch Global</label>
+                <select
+                  className="login-input"
+                  value={botStatus.settings?.portfolio_kill_switch_enabled ? 'on' : 'off'}
+                  onChange={(e) => updateSettings({ portfolio_kill_switch_enabled: e.target.value === 'on' })}
+                  disabled={isUpdating}
+                >
+                  <option value="on">ON</option>
+                  <option value="off">OFF</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Drawdown Max (%)</label>
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.portfolio_max_drawdown_pct || 12.0} onChange={(e) => updateSettings({ portfolio_max_drawdown_pct: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Trailing Adaptativo</label>
+                <select
+                  className="login-input"
+                  value={botStatus.settings?.adaptive_trailing_enabled ? 'on' : 'off'}
+                  onChange={(e) => updateSettings({ adaptive_trailing_enabled: e.target.value === 'on' })}
+                  disabled={isUpdating}
+                >
+                  <option value="on">ON</option>
+                  <option value="off">OFF</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>ATR Trail Mult</label>
+                <input type="number" step="0.05" className="login-input" value={botStatus.settings?.adaptive_trailing_atr_mult || 1.25} onChange={(e) => updateSettings({ adaptive_trailing_atr_mult: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+            <div className="settings-grid-2">
+              <div className="form-group">
+                <label>Trail Min (%)</label>
+                <input type="number" step="0.05" className="login-input" value={botStatus.settings?.adaptive_trailing_min_pct || 0.35} onChange={(e) => updateSettings({ adaptive_trailing_min_pct: e.target.value })} disabled={isUpdating} />
+              </div>
+              <div className="form-group">
+                <label>Trail Max (%)</label>
+                <input type="number" step="0.05" className="login-input" value={botStatus.settings?.adaptive_trailing_max_pct || 1.8} onChange={(e) => updateSettings({ adaptive_trailing_max_pct: e.target.value })} disabled={isUpdating} />
+              </div>
+            </div>
+          </div>
+         )}
 
           {/* Senior Protection Engine - Refactored for Premium Look & Logic */}
           <div style={{ 
@@ -483,7 +629,7 @@ export const StrategySettings = ({ botStatus, updateSettings, showStrategy, setS
                   { id: 'enable_fast_ema', label: 'Rápida', icon: '⚡' },
                   { id: 'enable_trend_filter', label: 'Tendencia', icon: '📈' },
                   { id: 'enable_vol_filter', label: 'Volumen', icon: '📊' },
-                  { id: 'enable_pair_exclusion', label: 'Exclusión', icon: '🚫' }
+                  { id: 'enable_mutual_exclusion', label: 'Exclusión', icon: '🚫' }
                ].map(filter => (
                   <div key={filter.id} style={{ position: 'relative' }}>
                     <div 

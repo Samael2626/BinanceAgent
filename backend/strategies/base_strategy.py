@@ -63,6 +63,15 @@ class BaseStrategy(ABC):
         sell_threshold = settings.get('sell_rsi', 70)
         is_global_trail = settings.get('trailing_enabled', False)
         trail_pct = settings.get('rsi_trailing_pct', 0.8)
+        if settings.get('adaptive_trailing_enabled', False):
+            atr = float(indicators.get('atr', 0) or 0)
+            if atr > 0 and current_price > 0:
+                adaptive_pct = (atr / current_price) * 100.0 * float(
+                    settings.get('adaptive_trailing_atr_mult', 1.25)
+                )
+                min_pct = float(settings.get('adaptive_trailing_min_pct', 0.35))
+                max_pct = float(settings.get('adaptive_trailing_max_pct', 1.8))
+                trail_pct = max(min_pct, min(max_pct, adaptive_pct))
 
         # C) Profit Step (ALWAYS ACTIVE):
         # Activate trailing automatically as soon as we are in profit

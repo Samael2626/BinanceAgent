@@ -1,13 +1,13 @@
-
-from predictive_modules import PredictiveEngine
 import sys
 import os
 import pandas as pd
 import numpy as np
 
-# Add backend to path to import modules
+# Add project root to path so importing backend triggers stdio UTF-8 setup
 sys.path.append(os.path.abspath(os.path.join(
-    os.path.dirname(__file__), '..', 'backend')))
+    os.path.dirname(__file__), '..')))
+
+from backend.predictive_modules import PredictiveEngine
 
 
 def create_dummy_data():

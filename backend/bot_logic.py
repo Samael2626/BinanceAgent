@@ -12,6 +12,19 @@ from .config import API_KEY, API_SECRET, TELEGRAM_BOT_TOKEN, TRADING_MODE
 from .database import DatabaseManager
 from .telegram_notifier import TelegramNotifier
 from .indicators import calculate_indicators
+from .risk import (
+    calculate_position_quote_size,
+    next_halt_timestamp,
+    sanitize_timeframe,
+    should_trigger_portfolio_kill_switch,
+    should_halt_buying,
+)
+from .scanner import (
+    RotationCandidate,
+    parse_rotation_watchlist,
+    score_rotation_candidate,
+    should_switch_rotation_candidate,
+)
 
 # Strategy Imports
 from .strategies.rsi_rebound import RSIReboundStrategy
@@ -37,8 +50,8 @@ class BinanceBot:
 
         # Core Settings
         self.symbol = self.db.get_setting("symbol", "BTCUSDT", user_id=user_id)
-        self.timeframe = self.db.get_setting(
-            "timeframe", "15m", user_id=user_id)  # Default updated to 15m
+        self.timeframe = sanitize_timeframe(self.db.get_setting(
+            "timeframe", "15m", user_id=user_id))
         self.client = None
         self.current_price = 0.0
         self.balance = 0.0
@@ -124,6 +137,51 @@ class BinanceBot:
             "testnet_commission_pct", 0.1, user_id=user_id))
         self.use_real_data = self.db.get_setting(
             "use_real_data", "False", user_id=user_id) == "True"
+
+        # Auto risk controls
+        self.auto_position_sizing = self.db.get_setting(
+            "auto_position_sizing", "True", user_id=user_id) == "True"
+        self.risk_per_trade_pct = float(self.db.get_setting(
+            "risk_per_trade_pct", 1.0, user_id=user_id))
+        self.max_daily_loss_pct = float(self.db.get_setting(
+            "max_daily_loss_pct", 5.0, user_id=user_id))
+        self.max_consecutive_losses = int(self.db.get_setting(
+            "max_consecutive_losses", 3, user_id=user_id))
+        self.atr_stop_mult = float(self.db.get_setting(
+            "atr_stop_mult", 1.5, user_id=user_id))
+        self.min_market_score_to_buy = float(self.db.get_setting(
+            "min_market_score_to_buy", 45.0, user_id=user_id))
+        self.cooldown_minutes = int(self.db.get_setting(
+            "cooldown_minutes", 10, user_id=user_id))
+        self._consecutive_losses = int(self.db.get_state(
+            "consecutive_losses", 0, user_id=user_id))
+        self._trading_halt_until = float(self.db.get_state(
+            "trading_halt_until", 0.0, user_id=user_id))
+        self.portfolio_kill_switch_enabled = self.db.get_setting(
+            "portfolio_kill_switch_enabled", "True", user_id=user_id) == "True"
+        self.portfolio_max_drawdown_pct = float(self.db.get_setting(
+            "portfolio_max_drawdown_pct", 12.0, user_id=user_id))
+        self.portfolio_kill_triggered = self.db.get_state(
+            "portfolio_kill_triggered", "False", user_id=user_id) == "True"
+        self.auto_asset_rotation = self.db.get_setting(
+            "auto_asset_rotation", "False", user_id=user_id) == "True"
+        self.rotation_interval_minutes = int(self.db.get_setting(
+            "rotation_interval_minutes", 15, user_id=user_id))
+        self.min_rotation_score = float(self.db.get_setting(
+            "min_rotation_score", 55.0, user_id=user_id))
+        self.rotation_watchlist = parse_rotation_watchlist(self.db.get_setting(
+            "rotation_watchlist", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,ADAUSDT,XRPUSDT,DOGEUSDT,MATICUSDT,AVAXUSDT,LINKUSDT", user_id=user_id))
+        self._last_rotation_scan_at = float(self.db.get_state(
+            "last_rotation_scan_at", 0.0, user_id=user_id))
+        self._rotation_candidates: list[dict] = []
+        self.adaptive_trailing_enabled = self.db.get_setting(
+            "adaptive_trailing_enabled", "True", user_id=user_id) == "True"
+        self.adaptive_trailing_atr_mult = float(self.db.get_setting(
+            "adaptive_trailing_atr_mult", 1.25, user_id=user_id))
+        self.adaptive_trailing_min_pct = float(self.db.get_setting(
+            "adaptive_trailing_min_pct", 0.35, user_id=user_id))
+        self.adaptive_trailing_max_pct = float(self.db.get_setting(
+            "adaptive_trailing_max_pct", 1.8, user_id=user_id))
 
         # Telegram Notifier
         self.tg_token = TELEGRAM_BOT_TOKEN
@@ -496,6 +554,12 @@ class BinanceBot:
                 self._print_status_heartbeat()
                 self.last_status_time = now_time
 
+            if self.auto_asset_rotation:
+                try:
+                    self._maybe_rotate_symbol(now_time)
+                except Exception as e:
+                    self._log(f"Scanner Error: {e}", "ERROR")
+
             # 2. ACCOUNT SYNC & SAFETY RESET (Every 10s)
             # We use a secondary timer or just check modulo if loop sleep is small
             if self.client and int(now_time) % 10 == 0:
@@ -517,6 +581,8 @@ class BinanceBot:
 
                         if self.current_price > 0:
                             self._update_equity()
+                            equity = self.balance + (self.crypto_balance * self.current_price)
+                            self._enforce_portfolio_kill_switch(equity)
 
                             # Update Highest Price for Trailing Stop logic
                             if self.accumulated_qty > 0:
@@ -607,6 +673,37 @@ class BinanceBot:
         self._log(
             f"📊 PNL UPDATE: Total={self.pnl:.2f} | Daily={self.daily_pnl:.2f} | Equity={equity:.2f}", "DEBUG")
 
+    def _enforce_portfolio_kill_switch(self, equity: float):
+        if not self.portfolio_kill_switch_enabled or self.portfolio_kill_triggered:
+            return
+
+        baseline = self.initial_balance or equity
+        triggered, reason = should_trigger_portfolio_kill_switch(
+            equity=equity,
+            baseline_equity=baseline,
+            max_drawdown_pct=self.portfolio_max_drawdown_pct,
+        )
+        if not triggered:
+            return
+
+        self.portfolio_kill_triggered = True
+        self.enable_buying = False
+        self.is_running = False
+        self.db.save_state("portfolio_kill_triggered", True, user_id=self.user_id)
+        self.db.save_state("enable_buying", False, user_id=self.user_id)
+        self.db.save_state("is_running", "False", user_id=self.user_id)
+        self._log(f"🛑 PORTFOLIO KILL SWITCH: {reason}", "ERROR")
+
+        if self._has_open_position():
+            qty_to_sell = self._calculate_sell_qty(self.crypto_balance)
+            if qty_to_sell > 0:
+                self._place_sell_order(
+                    self.symbol,
+                    qty_to_sell,
+                    self.current_price,
+                    "KILL_SWITCH",
+                )
+
     def _print_state_snapshot(self, buy_signal: bool = False, sell_signal: bool = False):
         """Prints a highly visible and structured snapshot of the current bot state."""
         import sys
@@ -678,6 +775,7 @@ class BinanceBot:
         indicators['adx'] = getattr(self, 'adx', 0)
 
         settings = self.get_settings()
+        market_score = float(self.prediction.get("market_score", 50) or 50)
         state = {
             "current_price": self.current_price,
             "entry_price": self.entry_price,
@@ -747,10 +845,22 @@ class BinanceBot:
 
         elif buy_sig_checked:
             if self.enable_buying:
+                blocked, reason = self._buy_block_reason(market_score)
+                if blocked:
+                    self._log(
+                        f"⛔ BUY BLOCKED ({strategy.name}): {reason}", "WARNING")
+                    return
+
                 self._log(
                     f"🚀 SEÑAL DE COMPRA DETECTADA por {strategy.name}", "INFO")
-                _, _ = self._place_buy_order(self.symbol, self.trade_qty, self.current_price, f"{strategy.name}-BUY",
-                                             is_quote=(self.trade_qty_type == "quote"))
+                order_qty = self._resolve_auto_buy_qty()
+                _, _ = self._place_buy_order(
+                    self.symbol,
+                    order_qty,
+                    self.current_price,
+                    f"{strategy.name}-BUY",
+                    is_quote=True if self.auto_position_sizing else (self.trade_qty_type == "quote"),
+                )
             else:
                 self._log(
                     f"🚀 SEÑAL DE COMPRA DETECTADA pero 'enable_buying' es False.", "WARNING")
@@ -805,6 +915,21 @@ class BinanceBot:
             self._log(
                 f"📥 Position Updated ({side} {strategy}): Entry=${self.entry_price:.2f} | Qty={self.accumulated_qty:.6f}", "INFO")
         else:
+            if pnl < 0:
+                self._consecutive_losses += 1
+            elif pnl > 0:
+                self._consecutive_losses = 0
+
+            self.db.save_state(
+                "consecutive_losses", self._consecutive_losses, user_id=self.user_id)
+
+            if self._consecutive_losses >= self.max_consecutive_losses:
+                self._trading_halt_until = next_halt_timestamp(self.cooldown_minutes)
+                self.db.save_state(
+                    "trading_halt_until", self._trading_halt_until, user_id=self.user_id)
+                self._log(
+                    f"⏸ Trading halted by loss guard for {self.cooldown_minutes}m", "WARNING")
+
             # Update accumulated quantity after a SELL
             self.accumulated_qty = max(
                 0.0, self.accumulated_qty - executed_qty)
@@ -891,6 +1016,13 @@ class BinanceBot:
                     self._log(f"❌ {err_msg}", "ERROR")
                     return None, err_msg
 
+            is_valid, reason = self.client.validate_order(
+                symbol, quantity, price, is_quote_qty=is_quote)
+            if not is_valid:
+                self._log(
+                    f"âŒ Aborting BUY after final validation: {reason}", "ERROR")
+                return None, reason
+
             trade = self.client.place_order(
                 symbol, "BUY", quantity, quote_order_qty=quantity if is_quote else None)
 
@@ -970,6 +1102,173 @@ class BinanceBot:
         step = self.trade_qty if self.trade_qty_type == "base" else (
             self.trade_qty / self.current_price if self.current_price > 0 else 0)
         return min(step, balance)
+
+    def _baseline_equity(self) -> float:
+        current_equity = self.balance + (self.crypto_balance * self.current_price)
+        return self.daily_start_balance or self.initial_balance or current_equity
+
+    def _buy_block_reason(self, market_score: float) -> tuple[bool, str]:
+        if self.portfolio_kill_triggered:
+            return True, "portfolio kill switch activo"
+
+        blocked, reason = should_halt_buying(
+            daily_pnl=self.daily_pnl,
+            baseline_equity=self._baseline_equity(),
+            max_daily_loss_pct=self.max_daily_loss_pct,
+            consecutive_losses=self._consecutive_losses,
+            max_consecutive_losses=self.max_consecutive_losses,
+            trading_halt_until=self._trading_halt_until,
+            market_score=market_score,
+            min_market_score_to_buy=self.min_market_score_to_buy,
+        )
+        return blocked, reason
+
+    def _resolve_auto_buy_qty(self) -> float:
+        if not self.auto_position_sizing:
+            if self.trade_qty_type == "quote":
+                return float(self.trade_qty)
+            if self.current_price > 0:
+                return float(self.trade_qty) * self.current_price
+            return float(self.trade_qty)
+
+        equity = self._baseline_equity()
+        atr = float(getattr(self, "atr", 0.0) or 0.0)
+        quote_qty = calculate_position_quote_size(
+            equity=equity,
+            current_price=self.current_price,
+            stop_loss_pct=self.stop_loss_pct,
+            atr=atr,
+            risk_per_trade_pct=self.risk_per_trade_pct,
+            atr_stop_mult=self.atr_stop_mult,
+            min_order_quote=10.0,
+            max_position_pct=25.0,
+        )
+        if quote_qty > 0:
+            return quote_qty
+        return float(self.trade_qty) if self.trade_qty_type == "quote" else float(self.trade_qty) * max(self.current_price, 1.0)
+
+    def _has_open_position(self) -> bool:
+        reference_price = self.current_price if self.current_price > 0 else self.entry_price
+        return self.accumulated_qty > 0 and (self.accumulated_qty * max(reference_price, 0.0)) >= 1.0
+
+    def _switch_symbol(self, new_symbol: str, reason: str = "") -> bool:
+        if not new_symbol or new_symbol == self.symbol:
+            return False
+        if self._has_open_position():
+            return False
+
+        previous_symbol = self.symbol
+        self.symbol = new_symbol
+        self.db.save_setting("symbol", new_symbol, user_id=self.user_id)
+
+        if reason:
+            self._log(
+                f"🔄 Switching symbol {previous_symbol} -> {new_symbol} | {reason}",
+                "INFO",
+            )
+        else:
+            self._log(f"🔄 Switching symbol {previous_symbol} -> {new_symbol}", "INFO")
+
+        if self.data_client:
+            self.data_client.start_kline_socket(
+                new_symbol, self.timeframe, self._on_kline_msg)
+
+        self._load_symbol_state()
+        self._update_account_balances()
+        self._update_market_data()
+        return True
+
+    def _scan_rotation_candidates(self) -> list[RotationCandidate]:
+        if not self.data_client:
+            return []
+
+        settings = self.get_settings()
+        candidates: list[RotationCandidate] = []
+
+        for symbol in self.rotation_watchlist:
+            try:
+                df = self.market_data_service.get_historical_data(
+                    symbol, self.timeframe, limit=300) if self.market_data_service else self.data_client.get_historical_klines(
+                    symbol, self.timeframe, limit=300)
+
+                if df is None or df.empty:
+                    continue
+
+                indicators = calculate_indicators(df, settings)
+                current_price = float(df["close"].iloc[-1])
+                prediction = self.predictive_engine.analyze(df, current_price)
+                candidate_score = score_rotation_candidate(prediction, indicators)
+
+                candidates.append(
+                    RotationCandidate(
+                        symbol=symbol,
+                        score=candidate_score,
+                        market_score=float(prediction.get("market_score", 50) or 50),
+                        breakout_prob=float(prediction.get("breakout_prob", 0) or 0),
+                        trend_strength=float(
+                            (prediction.get("trend_strength") or {}).get("score", 50) or 50
+                        ),
+                        rsi=float(indicators.get("rsi", 50) or 50),
+                        is_lateral=bool(indicators.get("is_lateral", False)),
+                    )
+                )
+            except Exception as exc:
+                self._log(f"Scanner skipped {symbol}: {exc}", "WARNING")
+
+        candidates.sort(key=lambda item: item.score, reverse=True)
+        self._rotation_candidates = [
+            {
+                "symbol": item.symbol,
+                "score": item.score,
+                "market_score": item.market_score,
+                "breakout_prob": item.breakout_prob,
+                "trend_strength": item.trend_strength,
+                "rsi": item.rsi,
+                "is_lateral": item.is_lateral,
+            }
+            for item in candidates[:5]
+        ]
+        return candidates
+
+    def _maybe_rotate_symbol(self, now_time: float):
+        if not self.auto_asset_rotation or not self.is_running or not self.client:
+            return
+        if self._has_open_position():
+            return
+
+        interval_seconds = max(self.rotation_interval_minutes, 1) * 60.0
+        if now_time - self._last_rotation_scan_at < interval_seconds:
+            return
+
+        self._last_rotation_scan_at = now_time
+        self.db.save_state(
+            "last_rotation_scan_at", self._last_rotation_scan_at, user_id=self.user_id)
+
+        candidates = self._scan_rotation_candidates()
+        if not candidates:
+            self._log("Scanner found no valid candidates.", "WARNING")
+            return
+
+        best_candidate = candidates[0]
+        current_candidate = next(
+            (item for item in candidates if item.symbol == self.symbol), None)
+        current_score = current_candidate.score if current_candidate else 0.0
+
+        if should_switch_rotation_candidate(
+            self.symbol,
+            current_score,
+            best_candidate,
+            self.min_rotation_score,
+        ):
+            self._switch_symbol(
+                best_candidate.symbol,
+                reason=f"scanner score {best_candidate.score:.1f} vs {current_score:.1f}",
+            )
+        else:
+            self._log(
+                f"Scanner stays on {self.symbol} | best={best_candidate.symbol} {best_candidate.score:.1f} | current={current_score:.1f}",
+                "DEBUG",
+            )
 
     def _log(self, message: str, level: str = "INFO"):
         """Logs bot messages to console and file, and sends Telegram alerts for errors."""
@@ -1190,6 +1489,7 @@ class BinanceBot:
                 "macd": round(self.macd, 2), "macd_signal": round(self.macd_signal, 2), "macd_hist": round(self.macd_hist, 2),
                 "bb_upper": round(self.bb_upper, 2), "bb_lower": round(self.bb_lower, 2), "current_vol": round(self.current_vol, 2),
                 "history": self.history, "trades": self.trades, "settings": self.get_settings(), "prediction": getattr(self, 'prediction', {}),
+                "scanner": {"last_scan_at": self._last_rotation_scan_at, "candidates": self._rotation_candidates},
                 "stats": {"wins": wins, "losses": losses, "win_rate": round(wr, 1), "net_pnl": round(net_pnl, 2), "daily_pnl": round(self.daily_pnl, 2)}
             }
 
@@ -1206,6 +1506,15 @@ class BinanceBot:
             "testnet_commission_pct": self.testnet_commission_pct, "macd_fast": self.macd_fast, "macd_slow": self.macd_slow,
             "dca_enabled": self.dca_enabled, "enable_rsi_alerts": self.enable_rsi_alerts, "enable_urgent_alerts": self.enable_urgent_alerts,
             "enable_trend_filter": self.enable_trend_filter, "enable_vol_filter": self.enable_vol_filter, "enable_mutual_exclusion": self.enable_mutual_exclusion,
+            "auto_position_sizing": self.auto_position_sizing, "risk_per_trade_pct": self.risk_per_trade_pct,
+            "max_daily_loss_pct": self.max_daily_loss_pct, "max_consecutive_losses": self.max_consecutive_losses,
+            "atr_stop_mult": self.atr_stop_mult, "min_market_score_to_buy": self.min_market_score_to_buy,
+            "cooldown_minutes": self.cooldown_minutes, "auto_asset_rotation": self.auto_asset_rotation,
+            "rotation_interval_minutes": self.rotation_interval_minutes, "min_rotation_score": self.min_rotation_score,
+            "rotation_watchlist": ",".join(self.rotation_watchlist), "portfolio_kill_switch_enabled": self.portfolio_kill_switch_enabled,
+            "portfolio_max_drawdown_pct": self.portfolio_max_drawdown_pct, "adaptive_trailing_enabled": self.adaptive_trailing_enabled,
+            "adaptive_trailing_atr_mult": self.adaptive_trailing_atr_mult, "adaptive_trailing_min_pct": self.adaptive_trailing_min_pct,
+            "adaptive_trailing_max_pct": self.adaptive_trailing_max_pct,
             "rsi_alert_buy_urgent": self.rsi_alert_buy_urgent, "rsi_alert_buy_normal": self.rsi_alert_buy_normal,
             "rsi_alert_sell_urgent": self.rsi_alert_sell_urgent, "rsi_alert_sell_normal": self.rsi_alert_sell_normal,
             "enable_fast_ema": self.enable_fast_ema, "fast_ema_len": self.fast_ema_len,
@@ -1232,7 +1541,17 @@ class BinanceBot:
                 data_mode_changed = True
                 new_data_mode = settings["use_real_data"]
 
+            if "timeframe" in settings:
+                settings["timeframe"] = sanitize_timeframe(
+                    settings["timeframe"], self.timeframe)
+                if settings["timeframe"] != self.timeframe:
+                    threading.Thread(target=self._update_market_data,
+                                     daemon=True).start()
+
             for k, v in settings.items():
+                if k == "enable_pair_exclusion":
+                    k = "enable_mutual_exclusion"
+
                 if isinstance(v, str):
                     if v.replace('.', '', 1).isdigit():
                         v = float(v) if '.' in v else int(v)
@@ -1240,6 +1559,9 @@ class BinanceBot:
                         v = True
                     elif v.lower() == 'false':
                         v = False
+
+                if k == "rotation_watchlist":
+                    v = parse_rotation_watchlist(v)
 
                 # Apply to standard attributes
                 if hasattr(self, k):
@@ -1250,15 +1572,18 @@ class BinanceBot:
                     setattr(self, mapping[k], v)
 
                 # Persist to DB (state vs setting)
+                persist_value = ",".join(v) if k == "rotation_watchlist" and isinstance(v, list) else v
                 state_keys = ["dca_enabled", "sniper_mode", "trailing_enabled",
-                              "enable_buying", "enable_selling"]
+                              "enable_buying", "enable_selling", "auto_position_sizing"]
                 if k in state_keys:
-                    self.db.save_state(k, v, user_id=self.user_id)
+                    self.db.save_state(k, persist_value, user_id=self.user_id)
                 else:
-                    self.db.save_setting(k, v, user_id=self.user_id)
+                    self.db.save_setting(k, persist_value, user_id=self.user_id)
 
         # TRIGGER ACTIONS OUTSIDE LOCK
         if symbol_changed:
+            self.symbol = new_symbol
+            self.db.save_setting("symbol", new_symbol, user_id=self.user_id)
             self._log(f"🔄 Switching symbol to {new_symbol} (Non-blocking)...")
             if self.data_client:
                 self.data_client.start_kline_socket(
@@ -1327,12 +1652,15 @@ class BinanceBot:
             self.daily_start_balance = current_equity
             self.pnl = 0.0
             self.daily_pnl = 0.0
+            self.portfolio_kill_triggered = False
 
             # Persist to local database
             self.db.save_state("initial_balance",
                                current_equity, user_id=self.user_id)
             self.db.save_state("daily_start_balance",
                                current_equity, user_id=self.user_id)
+            self.db.save_state("portfolio_kill_triggered",
+                               False, user_id=self.user_id)
             self.db.clear_trades(user_id=self.user_id)
             self.trades = []
 

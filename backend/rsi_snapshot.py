@@ -4,6 +4,7 @@ Calculates RSI for multiple trading pairs with caching for performance optimizat
 Uses pandas_ta for consistency with bot core indicators.
 """
 from .indicators import calculate_rsi_from_df as calculate_rsi
+from .scanner import DEFAULT_ROTATION_SYMBOLS
 import time
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -91,13 +92,4 @@ def calculate_rsi_snapshot(symbols: List[str], client, timeframe: str = "1m") ->
 
 def get_default_symbols() -> List[str]:
     """Returns default list of symbols to monitor."""
-    return [
-        "BTCUSDT",
-        "ETHUSDT",
-        "SOLUSDT",
-        "BNBUSDT",
-        "ADAUSDT",
-        "XRPUSDT",
-        "DOGEUSDT",
-        "MATICUSDT"
-    ]
+    return list(DEFAULT_ROTATION_SYMBOLS[:8])
