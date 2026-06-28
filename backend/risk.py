@@ -15,8 +15,8 @@ class RiskConfig:
     atr_stop_mult: float = 1.5
     min_order_quote: float = 10.0
     max_position_pct: float = 25.0
-    cooldown_minutes: int = 10
-    min_market_score_to_buy: float = 45.0
+    cooldown_minutes: int = 3
+    min_market_score_to_buy: float = 32.0
 
 
 def sanitize_timeframe(value: str, default: str = "15m") -> str:

@@ -258,7 +258,7 @@ export const RiskSettings = ({ botStatus, updateSettings, showRisk, setShowRisk,
               </div>
               <div className="form-group">
                 <label>Score Mínimo Compra</label>
-                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.min_market_score_to_buy || 45.0} onChange={(e) => updateSettings({ min_market_score_to_buy: e.target.value })} disabled={isUpdating} />
+                <input type="number" step="0.1" className="login-input" value={botStatus.settings?.min_market_score_to_buy || 32.0} onChange={(e) => updateSettings({ min_market_score_to_buy: e.target.value })} disabled={isUpdating} />
               </div>
             </div>
             <div className="settings-grid-2">

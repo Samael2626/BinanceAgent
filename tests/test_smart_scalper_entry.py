@@ -19,7 +19,7 @@ def test_smart_scalper_uses_entry_score_instead_of_perfect_conditions():
         "buy_rsi": 38.0,
         "enable_trend_filter": True,
         "enable_fast_ema": True,
-        "smart_scalper_entry_score": 68.0,
+        "smart_scalper_entry_score": 58.0,
     }
     state = {"current_price": 100.9}
 
@@ -42,7 +42,7 @@ def test_smart_scalper_blocks_when_score_is_too_low():
         "buy_rsi": 38.0,
         "enable_trend_filter": True,
         "enable_fast_ema": True,
-        "smart_scalper_entry_score": 68.0,
+        "smart_scalper_entry_score": 58.0,
     }
     state = {"current_price": 98.0}
 

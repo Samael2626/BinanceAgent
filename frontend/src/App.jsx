@@ -72,7 +72,7 @@ function App() {
       max_daily_loss_pct: 5.0,
       max_consecutive_losses: 3,
       atr_stop_mult: 1.5,
-      min_market_score_to_buy: 45.0,
+      "min_market_score_to_buy": 32.0,
       cooldown_minutes: 10,
       enable_mutual_exclusion: true,
       auto_asset_rotation: false,

@@ -17,9 +17,9 @@ class ScannerBacktestConfig:
     window: int = 80
     rotation_interval: int = 15
     min_rotation_score: float = 55.0
-    min_market_score_to_buy: float = 45.0
-    stop_loss_pct: float = 3.2
-    take_profit_pct: float = 1.3
+    min_market_score_to_buy: float = 32.0
+    stop_loss_pct: float = 1.5
+    take_profit_pct: float = 1.5
     fee_pct: float = 0.1
 
 

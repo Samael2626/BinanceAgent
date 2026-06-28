@@ -51,7 +51,7 @@ class BinanceBot:
         # Core Settings
         self.symbol = self.db.get_setting("symbol", "BTCUSDT", user_id=user_id)
         self.timeframe = sanitize_timeframe(self.db.get_setting(
-            "timeframe", "15m", user_id=user_id))
+            "timeframe", "5m", user_id=user_id))
         self.client = None
         self.current_price = 0.0
         self.balance = 0.0
@@ -81,16 +81,16 @@ class BinanceBot:
         self.active_strategy = self.db.get_setting(
             "active_strategy", "rsi", user_id=user_id)
         self.smart_scalper_entry_score = float(self.db.get_setting(
-            "smart_scalper_entry_score", 68.0, user_id=user_id))
+            "smart_scalper_entry_score", 58.0, user_id=user_id))
         self.trade_qty_type = self.db.get_setting(
             # Default updated to quote (USDT)
             "trade_qty_type", "quote", user_id=user_id)
 
         # Risk Management Settings
         self.stop_loss_pct = float(self.db.get_setting(
-            "stop_loss_pct", 3.2, user_id=user_id))  # Default 3.2%
+            "stop_loss_pct", 1.5, user_id=user_id))  # Default 1.5%
         self.take_profit_pct = float(self.db.get_setting(
-            "take_profit_pct", 1.3, user_id=user_id))  # Default 1.3%
+            "take_profit_pct", 1.5, user_id=user_id))  # Default 1.5%
         self.max_dca_orders = int(self.db.get_setting(
             "max_dca_orders", 2, user_id=user_id))  # Default 2
         self.dca_step_pct = float(self.db.get_setting(
@@ -153,7 +153,7 @@ class BinanceBot:
         self.auto_position_sizing = self.db.get_setting(
             "auto_position_sizing", "True", user_id=user_id) == "True"
         self.risk_per_trade_pct = float(self.db.get_setting(
-            "risk_per_trade_pct", 1.0, user_id=user_id))
+            "risk_per_trade_pct", 0.75, user_id=user_id))
         self.max_daily_loss_pct = float(self.db.get_setting(
             "max_daily_loss_pct", 5.0, user_id=user_id))
         self.max_consecutive_losses = int(self.db.get_setting(
@@ -161,9 +161,9 @@ class BinanceBot:
         self.atr_stop_mult = float(self.db.get_setting(
             "atr_stop_mult", 1.5, user_id=user_id))
         self.min_market_score_to_buy = float(self.db.get_setting(
-            "min_market_score_to_buy", 45.0, user_id=user_id))
+            "min_market_score_to_buy", 32.0, user_id=user_id))
         self.cooldown_minutes = int(self.db.get_setting(
-            "cooldown_minutes", 10, user_id=user_id))
+            "cooldown_minutes", 3, user_id=user_id))
         self._consecutive_losses = int(self.db.get_state(
             "consecutive_losses", 0, user_id=user_id))
         self._trading_halt_until = float(self.db.get_state(
@@ -217,7 +217,8 @@ class BinanceBot:
         self.rsi_alert_sell_urgent = float(self.db.get_setting(
             "rsi_alert_sell_urgent", 75.0, user_id=user_id))
         self.rsi_alert_sell_normal = float(self.db.get_setting(
-            "rsi_alert_sell_normal", 65.0, user_id=user_id))
+            "rsi_alert_sell_normal", 70.0, user_id=user_id))
+
 
         # Anti-spam state per symbol (dict of dicts)
         # Format: {"BTCUSDT": {"buy_normal": False, "buy_urgent": False, ...}, ...}
