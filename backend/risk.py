@@ -9,7 +9,7 @@ ALLOWED_TIMEFRAMES = {"1m", "5m", "15m", "1h"}
 @dataclass(frozen=True)
 class RiskConfig:
     auto_position_sizing: bool = True
-    risk_per_trade_pct: float = 1.0
+    risk_per_trade_pct: float = 0.75
     max_daily_loss_pct: float = 5.0
     max_consecutive_losses: int = 3
     atr_stop_mult: float = 1.5

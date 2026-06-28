@@ -61,7 +61,7 @@ class BinanceBot:
         self.min_balance_threshold = float(
             self.db.get_setting("min_balance", 0.0, user_id=user_id))
         self.trade_qty = float(self.db.get_setting(
-            "trade_qty", 35.0, user_id=user_id))  # Default updated to 35 USDT
+            "trade_qty", 12.0, user_id=user_id))  # Default aligned to real calibration (12 USDT)
         self.buy_rsi = float(self.db.get_setting(
             "buy_rsi", 21.0, user_id=user_id))  # Default updated to 21
         self.sell_rsi = float(self.db.get_setting(
@@ -80,6 +80,8 @@ class BinanceBot:
             "enable_fast_ema", "True", user_id=user_id) == "True"
         self.active_strategy = self.db.get_setting(
             "active_strategy", "rsi", user_id=user_id)
+        self.smart_scalper_entry_score = float(self.db.get_setting(
+            "smart_scalper_entry_score", 68.0, user_id=user_id))
         self.trade_qty_type = self.db.get_setting(
             # Default updated to quote (USDT)
             "trade_qty_type", "quote", user_id=user_id)
@@ -214,6 +216,8 @@ class BinanceBot:
 
         # Internal State
         self.last_signal = "none"
+        self.last_buy_block_reason = ""
+        self.last_buy_signal_score = 0.0
         self.crypto_dust = 0.0
         self.partial_traces = []
         self.last_buy_price = 0.0
@@ -788,6 +792,8 @@ class BinanceBot:
         # 2. Check Signals
         buy_sig_checked = False
         sell_sig_checked = False
+        self.last_buy_block_reason = ""
+        self.last_buy_signal_score = 0.0
 
         if self.accumulated_qty > 0:
             sell_sig_checked = strategy.check_sell_signal(
@@ -824,8 +830,23 @@ class BinanceBot:
                         f"⚠️ Error checking mutual exclusion: {e}", "WARNING")
 
             if not is_blocked_by_exclusion and not indicators.get('is_lateral', False):
+                if hasattr(strategy, "score_buy_setup"):
+                    try:
+                        buy_score, _ = strategy.score_buy_setup(
+                            indicators, settings, state)
+                        self.last_buy_signal_score = round(float(buy_score), 2)
+                    except Exception:
+                        self.last_buy_signal_score = 0.0
                 buy_sig_checked = strategy.check_buy_signal(
                     indicators, settings, state)
+                if not buy_sig_checked:
+                    min_score = settings.get(
+                        "smart_scalper_entry_score", "strategy threshold")
+                    self.last_buy_block_reason = f"strategy threshold not met (score={self.last_buy_signal_score}, min={min_score})"
+            elif is_blocked_by_exclusion:
+                self.last_buy_block_reason = "mutual exclusion active"
+            elif indicators.get('is_lateral', False):
+                self.last_buy_block_reason = "lateral market filter active"
 
         # Requirement: Print block before evaluation (showing what we found)
         self._print_state_snapshot(
@@ -847,6 +868,7 @@ class BinanceBot:
             if self.enable_buying:
                 blocked, reason = self._buy_block_reason(market_score)
                 if blocked:
+                    self.last_buy_block_reason = reason
                     self._log(
                         f"⛔ BUY BLOCKED ({strategy.name}): {reason}", "WARNING")
                     return
@@ -1489,6 +1511,7 @@ class BinanceBot:
                 "macd": round(self.macd, 2), "macd_signal": round(self.macd_signal, 2), "macd_hist": round(self.macd_hist, 2),
                 "bb_upper": round(self.bb_upper, 2), "bb_lower": round(self.bb_lower, 2), "current_vol": round(self.current_vol, 2),
                 "history": self.history, "trades": self.trades, "settings": self.get_settings(), "prediction": getattr(self, 'prediction', {}),
+                "last_buy_block_reason": self.last_buy_block_reason, "last_buy_signal_score": self.last_buy_signal_score,
                 "scanner": {"last_scan_at": self._last_rotation_scan_at, "candidates": self._rotation_candidates},
                 "stats": {"wins": wins, "losses": losses, "win_rate": round(wr, 1), "net_pnl": round(net_pnl, 2), "daily_pnl": round(self.daily_pnl, 2)}
             }
@@ -1519,7 +1542,8 @@ class BinanceBot:
             "rsi_alert_sell_urgent": self.rsi_alert_sell_urgent, "rsi_alert_sell_normal": self.rsi_alert_sell_normal,
             "enable_fast_ema": self.enable_fast_ema, "fast_ema_len": self.fast_ema_len,
             "ema_length": self.ema_length, "macd_signal": self.macd_signal_period,
-            "rsi_trailing_pct": self.rsi_trailing_pct
+            "rsi_trailing_pct": self.rsi_trailing_pct,
+            "smart_scalper_entry_score": self.smart_scalper_entry_score,
         }
 
     def update_settings(self, settings: dict):

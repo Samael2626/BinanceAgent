@@ -166,6 +166,41 @@ Si no compra, revisa en este orden:
 8. Balance USDT supera el minimo de orden.
 9. No hay posicion bloqueando mutual exclusion.
 
+Desde la calibracion 2026-06-28, `/api/status` tambien muestra:
+
+```text
+last_buy_signal_score
+last_buy_block_reason
+settings.smart_scalper_entry_score
+```
+
+En `smart_scalping`, la compra ya no exige una entrada perfecta. Ahora suma score por confluencia:
+
+- RSI en zona de compra.
+- MACD positivo o estabilizando.
+- Precio sobre o cerca de EMA de tendencia.
+- Precio sobre o cerca de EMA rapida.
+
+Umbral aplicado:
+
+```text
+smart_scalper_entry_score: 68
+```
+
+Interpretacion:
+
+- `68`: balanceado, mas constante que el modo estricto anterior.
+- `60-64`: mas activo; usar solo con monto pequeno y kill-switch activo.
+- `<58`: agresivo; puede comprar rebotes debiles.
+
+Ejemplo:
+
+```text
+strategy threshold not met (score=46.0, min=68.0)
+```
+
+Significa que hubo senal parcial, pero no suficiente confluencia para comprar.
+
 ## 8. Ajustes rapidos segun comportamiento
 
 Si no compra nunca:

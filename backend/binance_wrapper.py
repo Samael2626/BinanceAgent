@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Callable
 from math import floor, ceil
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, InvalidOperation
 import asyncio
 import threading
 import time
@@ -115,12 +116,20 @@ class BinanceWrapper:
 
         for f in info['filters']:
             if f['filterType'] in ['LOT_SIZE', 'MARKET_LOT_SIZE']:
-                step_size = float(f['stepSize'])
-                precision = int(round(-np.log10(step_size)))
-                normalized = floor(
-                    quantity * (10**precision)) / (10**precision)
-                return normalized
+                return self._quantize_to_step(quantity, f['stepSize'], ROUND_DOWN)
         return quantity
+
+    @staticmethod
+    def _quantize_to_step(value: float, step_size: str | float, rounding=ROUND_DOWN) -> float:
+        try:
+            step = Decimal(str(step_size))
+            val = Decimal(str(value))
+            if step <= 0:
+                return float(value)
+            units = (val / step).to_integral_value(rounding=rounding)
+            return float(units * step)
+        except (InvalidOperation, ValueError, TypeError):
+            return float(value)
 
     def adjust_to_min_notional(self, symbol: str, quantity: float, price: float, is_quote_qty: bool = False) -> Optional[float]:
         """Checks if quantity * price < MIN_NOTIONAL and adjusts if needed."""
@@ -153,14 +162,13 @@ class BinanceWrapper:
         if not lot_filter:
             return None
 
-        step_size = float(lot_filter['stepSize'])
         required_qty = target_notional / price
-        precision = int(round(-np.log10(step_size)))
-        adjusted_qty = ceil(required_qty * (10**precision)) / (10**precision)
+        adjusted_qty = self._quantize_to_step(
+            required_qty, lot_filter['stepSize'], ROUND_UP)
 
         # double check
         if adjusted_qty * price < min_notional:
-            adjusted_qty += step_size
+            adjusted_qty += float(lot_filter['stepSize'])
 
         return adjusted_qty
 
@@ -171,6 +179,11 @@ class BinanceWrapper:
             return True, "OK"
 
         filters = {f['filterType']: f for f in info['filters']}
+
+        if quantity <= 0:
+            return False, "quantity must be greater than zero"
+        if price <= 0:
+            return False, "price must be greater than zero"
 
         # 1. LOT_SIZE check (only if not using quote quantity)
         if not is_quote_qty:
@@ -183,6 +196,22 @@ class BinanceWrapper:
                     return False, f"Cantidad {quantity} menor al mínimo ({min_qty} {symbol.replace('USDT', '')})"
                 if quantity > max_qty:
                     return False, f"Cantidad {quantity} excede el máximo ({max_qty})"
+
+                normalized = self.normalize_quantity(symbol, quantity)
+                step_size = float(lot_filter['stepSize'])
+                if normalized is not None and abs(float(normalized) - float(quantity)) > max(step_size / 10.0, 1e-12):
+                    return False, f"quantity {quantity} does not match stepSize {step_size}"
+
+        if is_quote_qty:
+            market_lot = filters.get('MARKET_LOT_SIZE')
+            if market_lot and price > 0:
+                min_qty = float(market_lot.get('minQty', 0) or 0)
+                max_qty = float(market_lot.get('maxQty', 0) or 0)
+                approx_qty = quantity / price
+                if min_qty > 0 and approx_qty < min_qty:
+                    return False, f"quote amount {quantity:.2f} buys less than MARKET_LOT_SIZE minQty {min_qty}"
+                if max_qty > 0 and approx_qty > max_qty:
+                    return False, f"quote amount {quantity:.2f} exceeds MARKET_LOT_SIZE maxQty {max_qty}"
 
         # 2. NOTIONAL check
         min_notional = 5.0
