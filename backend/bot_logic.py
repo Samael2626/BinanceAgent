@@ -81,7 +81,7 @@ class BinanceBot:
         self.active_strategy = self.db.get_setting(
             "active_strategy", "rsi", user_id=user_id)
         self.smart_scalper_entry_score = float(self.db.get_setting(
-            "smart_scalper_entry_score", 58.0, user_id=user_id))
+            "smart_scalper_entry_score", 55.0, user_id=user_id))
         self.trade_qty_type = self.db.get_setting(
             # Default updated to quote (USDT)
             "trade_qty_type", "quote", user_id=user_id)
