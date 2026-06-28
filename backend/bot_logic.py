@@ -126,6 +126,15 @@ class BinanceBot:
             "enable_buying", True, user_id=user_id)
         self.enable_selling = self.db.get_state(
             "enable_selling", True, user_id=user_id)
+        # Normalize persisted state to actual bool (DB stores text like 'True'/'False'/'1'/'0')
+        def _to_bool(v):
+            if isinstance(v, bool):
+                return v
+            return str(v).strip().lower() in {"true", "1", "yes", "on"}
+        if not isinstance(self.enable_buying, bool):
+            self.enable_buying = _to_bool(self.enable_buying)
+        if not isinstance(self.enable_selling, bool):
+            self.enable_selling = _to_bool(self.enable_selling)
 
         # New Quantitative Filter Controls
         self.enable_trend_filter = self.db.get_setting(
