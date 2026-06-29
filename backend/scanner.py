@@ -29,6 +29,69 @@ class RotationCandidate:
     is_lateral: bool
 
 
+def build_scanner_decision(
+    symbol: str,
+    *,
+    candidate_score: float | None,
+    min_candidate_score: float,
+    prediction: dict | None = None,
+    indicators: dict | None = None,
+    candle_count: int | None = None,
+    min_candles: int = 50,
+    min_market_score: float = 28.0,
+    spread_bps: float | None = None,
+    max_spread_bps: float | None = None,
+) -> dict:
+    """Build a diagnostic record without changing scanner selection rules."""
+    prediction = prediction or {}
+    indicators = indicators or {}
+    reasons: list[str] = []
+
+    if candle_count is None:
+        reasons.append("no_candles")
+    elif candle_count <= 0:
+        reasons.append("no_candles")
+    elif candle_count < min_candles:
+        reasons.append("insufficient_candles")
+
+    market_score = float(prediction.get("market_score", 50) or 50)
+    trend_strength = float(
+        (prediction.get("trend_strength") or {}).get("score", 50) or 50
+    )
+    rvol = float(prediction.get("rvol", 1.0) or 1.0)
+
+    if rvol < 0.5:
+        reasons.append("low_volume")
+    if max_spread_bps is not None and spread_bps is not None and spread_bps > max_spread_bps:
+        reasons.append("spread_too_wide")
+    if market_score < min_market_score:
+        reasons.append("low_market_score")
+    if trend_strength < 35:
+        reasons.append("weak_trend")
+    if bool(indicators.get("is_lateral", False)):
+        reasons.append("lateral_market")
+
+    allowed = candidate_score is not None and candidate_score >= min_candidate_score
+    reason = "candidate_ok" if allowed else "below_rotation_score"
+    if candidate_score is None:
+        reason = reasons[0] if reasons else "not_scored"
+
+    return {
+        "symbol": symbol,
+        "allowed": allowed,
+        "reason": reason,
+        "reasons": reasons,
+        "score": candidate_score,
+        "threshold": min_candidate_score,
+        "market_score": market_score,
+        "min_market_score": min_market_score,
+        "trend_strength": trend_strength,
+        "rvol": rvol,
+        "candles": candle_count,
+        "spread_bps": spread_bps,
+    }
+
+
 def parse_rotation_watchlist(raw: str | Iterable[str] | None) -> list[str]:
     if raw is None:
         return list(DEFAULT_ROTATION_SYMBOLS)

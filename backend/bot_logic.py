@@ -10,6 +10,11 @@ from datetime import datetime
 from .binance_wrapper import BinanceWrapper
 from .config import API_KEY, API_SECRET, TELEGRAM_BOT_TOKEN, TRADING_MODE
 from .database import DatabaseManager
+from .decision_trace import (
+    decision_reason_code,
+    format_decision_trace,
+    order_reason_code,
+)
 from .telegram_notifier import TelegramNotifier
 from .indicators import calculate_indicators
 from .risk import (
@@ -21,6 +26,7 @@ from .risk import (
 )
 from .scanner import (
     RotationCandidate,
+    build_scanner_decision,
     parse_rotation_watchlist,
     score_rotation_candidate,
     should_switch_rotation_candidate,
@@ -787,6 +793,8 @@ class BinanceBot:
         # Add extra indicators that might be useful
         indicators['is_lateral'] = getattr(self, 'is_lateral', False)
         indicators['adx'] = getattr(self, 'adx', 0)
+        indicators['fluctuation_factor'] = getattr(
+            self, 'fluctuation_factor', 0)
 
         settings = self.get_settings()
         market_score = float(self.prediction.get("market_score", 50) or 50)
@@ -802,10 +810,14 @@ class BinanceBot:
         # 2. Check Signals
         buy_sig_checked = False
         sell_sig_checked = False
+        is_blocked_by_exclusion = False
+        entry_reason = "no_buy_signal"
+        entry_detail = ""
         self.last_buy_block_reason = ""
         self.last_buy_signal_score = 0.0
 
         if self.accumulated_qty > 0:
+            entry_reason = "position_open"
             sell_sig_checked = strategy.check_sell_signal(
                 indicators, settings, state)
 
@@ -821,9 +833,9 @@ class BinanceBot:
                     self._log(
                         f"📉 DCA Step Reached: Price {self.current_price:.2f} <= Limit {step_price:.2f} (-{self.dca_step_pct}%)", "INFO")
                     buy_sig_checked = True
+                    entry_reason = "dca_step_reached"
         else:
             # MUTUAL EXCLUSION RULE (Optional): No operar BTC y SOL al mismo tiempo.
-            is_blocked_by_exclusion = False
             if self.enable_mutual_exclusion:
                 try:
                     asset_to_check = "SOL" if "BTC" in self.symbol else "BTC"
@@ -842,21 +854,48 @@ class BinanceBot:
             if not is_blocked_by_exclusion and not indicators.get('is_lateral', False):
                 if hasattr(strategy, "score_buy_setup"):
                     try:
-                        buy_score, _ = strategy.score_buy_setup(
+                        buy_score, score_reasons = strategy.score_buy_setup(
                             indicators, settings, state)
                         self.last_buy_signal_score = round(float(buy_score), 2)
-                    except Exception:
+                        entry_detail = ",".join(score_reasons)
+                    except Exception as exc:
                         self.last_buy_signal_score = 0.0
+                        entry_detail = f"score_error={exc}"
                 buy_sig_checked = strategy.check_buy_signal(
                     indicators, settings, state)
                 if not buy_sig_checked:
                     min_score = settings.get(
                         "smart_scalper_entry_score", "strategy threshold")
                     self.last_buy_block_reason = f"strategy threshold not met (score={self.last_buy_signal_score}, min={min_score})"
+                    entry_reason = "strategy_score_below_threshold"
+                else:
+                    entry_reason = "strategy_signal_ready"
             elif is_blocked_by_exclusion:
                 self.last_buy_block_reason = "mutual exclusion active"
+                entry_reason = "mutual_exclusion_active"
             elif indicators.get('is_lateral', False):
+                if hasattr(strategy, "score_buy_setup"):
+                    try:
+                        buy_score, score_reasons = strategy.score_buy_setup(
+                            indicators, settings, state)
+                        self.last_buy_signal_score = round(float(buy_score), 2)
+                        entry_detail = ",".join(score_reasons)
+                    except Exception as exc:
+                        entry_detail = f"score_error={exc}"
                 self.last_buy_block_reason = "lateral market filter active"
+                entry_reason = "lateral_market"
+
+        self._log_entry_decision(
+            strategy=strategy.name,
+            signal="BUY",
+            allowed=bool(buy_sig_checked),
+            reason=entry_reason,
+            score=self.last_buy_signal_score,
+            threshold=settings.get("smart_scalper_entry_score", 0),
+            market_score=market_score,
+            detail=entry_detail,
+            indicators=indicators,
+        )
 
         # Requirement: Print block before evaluation (showing what we found)
         self._print_state_snapshot(
@@ -879,6 +918,17 @@ class BinanceBot:
                 blocked, reason = self._buy_block_reason(market_score)
                 if blocked:
                     self.last_buy_block_reason = reason
+                    self._log_entry_decision(
+                        strategy=strategy.name,
+                        signal="BUY",
+                        allowed=False,
+                        reason=decision_reason_code(reason),
+                        score=self.last_buy_signal_score,
+                        threshold=settings.get("smart_scalper_entry_score", 0),
+                        market_score=market_score,
+                        detail=reason,
+                        indicators=indicators,
+                    )
                     self._log(
                         f"⛔ BUY BLOCKED ({strategy.name}): {reason}", "WARNING")
                     return
@@ -886,6 +936,17 @@ class BinanceBot:
                 self._log(
                     f"🚀 SEÑAL DE COMPRA DETECTADA por {strategy.name}", "INFO")
                 order_qty = self._resolve_auto_buy_qty()
+                self._log_entry_decision(
+                    strategy=strategy.name,
+                    signal="BUY",
+                    allowed=True,
+                    reason="entry_gates_passed",
+                    score=self.last_buy_signal_score,
+                    threshold=settings.get("smart_scalper_entry_score", 0),
+                    market_score=market_score,
+                    detail=f"qty={order_qty}",
+                    indicators=indicators,
+                )
                 _, _ = self._place_buy_order(
                     self.symbol,
                     order_qty,
@@ -894,6 +955,17 @@ class BinanceBot:
                     is_quote=True if self.auto_position_sizing else (self.trade_qty_type == "quote"),
                 )
             else:
+                self._log_entry_decision(
+                    strategy=strategy.name,
+                    signal="BUY",
+                    allowed=False,
+                    reason="buying_disabled",
+                    score=self.last_buy_signal_score,
+                    threshold=settings.get("smart_scalper_entry_score", 0),
+                    market_score=market_score,
+                    detail="enable_buying=False",
+                    indicators=indicators,
+                )
                 self._log(
                     f"🚀 SEÑAL DE COMPRA DETECTADA pero 'enable_buying' es False.", "WARNING")
 
@@ -1025,9 +1097,36 @@ class BinanceBot:
                     symbol, quantity, price, is_quote_qty=is_quote)
                 if adj:
                     self._log(
+                        format_decision_trace(
+                            "ORDER_DECISION",
+                            symbol=symbol,
+                            side="BUY",
+                            allowed=True,
+                            reason="min_notional_adjusted",
+                            qty=quantity,
+                            adjusted_qty=adj,
+                            price=price,
+                            detail=reason,
+                        ),
+                        "INFO",
+                    )
+                    self._log(
                         f"⚠️ Adjusting order from {quantity} to {adj} to meet minimum requirement", "INFO")
                     quantity = adj
                 else:
+                    self._log(
+                        format_decision_trace(
+                            "ORDER_DECISION",
+                            symbol=symbol,
+                            side="BUY",
+                            allowed=False,
+                            reason=order_reason_code(reason),
+                            qty=quantity,
+                            price=price,
+                            detail=reason,
+                        ),
+                        "WARNING",
+                    )
                     self._log(f"❌ Aborting BUY: {reason}", "ERROR")
                     return None, reason
 
@@ -1045,6 +1144,20 @@ class BinanceBot:
                     # For base asset, we can't easily adjust without recalc step size.
                     # If margin caused it, fail.
                     err_msg = f"Insufficient balance for order: Required {total_required:.2f} USDT, have {self.balance:.2f} USDT"
+                    self._log(
+                        format_decision_trace(
+                            "ORDER_DECISION",
+                            symbol=symbol,
+                            side="BUY",
+                            allowed=False,
+                            reason="balance_insufficient",
+                            qty=quantity,
+                            price=price,
+                            required=round(total_required, 4),
+                            balance=round(float(self.balance), 4),
+                        ),
+                        "WARNING",
+                    )
                     self._log(f"❌ {err_msg}", "ERROR")
                     return None, err_msg
 
@@ -1052,20 +1165,71 @@ class BinanceBot:
                 symbol, quantity, price, is_quote_qty=is_quote)
             if not is_valid:
                 self._log(
+                    format_decision_trace(
+                        "ORDER_DECISION",
+                        symbol=symbol,
+                        side="BUY",
+                        allowed=False,
+                        reason=order_reason_code(reason),
+                        qty=quantity,
+                        price=price,
+                        detail=reason,
+                    ),
+                    "WARNING",
+                )
+                self._log(
                     f"âŒ Aborting BUY after final validation: {reason}", "ERROR")
                 return None, reason
 
+            self._log(
+                format_decision_trace(
+                    "ORDER_DECISION",
+                    symbol=symbol,
+                    side="BUY",
+                    allowed=True,
+                    reason="submitting_order",
+                    qty=quantity,
+                    price=price,
+                    is_quote=is_quote,
+                ),
+                "INFO",
+            )
             trade = self.client.place_order(
                 symbol, "BUY", quantity, quote_order_qty=quantity if is_quote else None)
 
             if not trade:
                 err_msg = "Buy order returned None (Check logs for details)"
+                self._log(
+                    format_decision_trace(
+                        "ORDER_DECISION",
+                        symbol=symbol,
+                        side="BUY",
+                        allowed=False,
+                        reason="order_returned_none",
+                        qty=quantity,
+                        price=price,
+                    ),
+                    "ERROR",
+                )
                 self._log(f"❌ {err_msg}", "ERROR")
                 return None, err_msg
 
             return self._handle_trade_execution(trade, "BUY", strategy, quantity, price), None
         except Exception as e:
             err_msg = f"Exception in _place_buy_order: {str(e)}"
+            self._log(
+                format_decision_trace(
+                    "ORDER_DECISION",
+                    symbol=symbol,
+                    side="BUY",
+                    allowed=False,
+                    reason=order_reason_code(str(e)),
+                    qty=quantity,
+                    price=price,
+                    detail=str(e),
+                ),
+                "ERROR",
+            )
             self._log(f"❌ {err_msg}", "ERROR")
             return None, err_msg
 
@@ -1212,6 +1376,26 @@ class BinanceBot:
 
     def _scan_rotation_candidates(self) -> list[RotationCandidate]:
         if not self.data_client:
+            self._log(
+                format_decision_trace(
+                    "SCANNER_DECISION",
+                    symbol=self.symbol,
+                    allowed=False,
+                    reason="no_data_client",
+                ),
+                "WARNING",
+            )
+            return []
+        if not self.rotation_watchlist:
+            self._log(
+                format_decision_trace(
+                    "SCANNER_DECISION",
+                    symbol=self.symbol,
+                    allowed=False,
+                    reason="empty_watchlist",
+                ),
+                "WARNING",
+            )
             return []
 
         settings = self.get_settings()
@@ -1224,12 +1408,59 @@ class BinanceBot:
                     symbol, self.timeframe, limit=300)
 
                 if df is None or df.empty:
+                    decision = build_scanner_decision(
+                        symbol,
+                        candidate_score=None,
+                        min_candidate_score=self.min_rotation_score,
+                        candle_count=0,
+                    )
+                    self._log(
+                        format_decision_trace(
+                            "SCANNER_DECISION",
+                            **decision,
+                            detail="no klines returned",
+                        ),
+                        "WARNING",
+                    )
                     continue
+
+                candle_count = len(df)
+                if candle_count < 50:
+                    self._log(
+                        format_decision_trace(
+                            "SCANNER_DECISION",
+                            symbol=symbol,
+                            allowed=True,
+                            reason="insufficient_candles",
+                            candles=candle_count,
+                            threshold=50,
+                        ),
+                        "WARNING",
+                    )
 
                 indicators = calculate_indicators(df, settings)
                 current_price = float(df["close"].iloc[-1])
                 prediction = self.predictive_engine.analyze(df, current_price)
                 candidate_score = score_rotation_candidate(prediction, indicators)
+                decision = build_scanner_decision(
+                    symbol,
+                    candidate_score=candidate_score,
+                    min_candidate_score=self.min_rotation_score,
+                    prediction=prediction,
+                    indicators=indicators,
+                    candle_count=candle_count,
+                    min_market_score=self.min_market_score_to_buy,
+                    spread_bps=prediction.get("spread_bps"),
+                    max_spread_bps=prediction.get("max_spread_bps"),
+                )
+                self._log(
+                    format_decision_trace(
+                        "SCANNER_DECISION",
+                        **decision,
+                        detail=",".join(decision["reasons"]),
+                    ),
+                    "DEBUG",
+                )
 
                 candidates.append(
                     RotationCandidate(
@@ -1245,7 +1476,16 @@ class BinanceBot:
                     )
                 )
             except Exception as exc:
-                self._log(f"Scanner skipped {symbol}: {exc}", "WARNING")
+                self._log(
+                    format_decision_trace(
+                        "SCANNER_DECISION",
+                        symbol=symbol,
+                        allowed=False,
+                        reason="scanner_exception",
+                        detail=str(exc),
+                    ),
+                    "WARNING",
+                )
 
         candidates.sort(key=lambda item: item.score, reverse=True)
         self._rotation_candidates = [
@@ -1278,7 +1518,15 @@ class BinanceBot:
 
         candidates = self._scan_rotation_candidates()
         if not candidates:
-            self._log("Scanner found no valid candidates.", "WARNING")
+            self._log(
+                format_decision_trace(
+                    "SCANNER_DECISION",
+                    symbol=self.symbol,
+                    allowed=False,
+                    reason="no_candidates",
+                ),
+                "WARNING",
+            )
             return
 
         best_candidate = candidates[0]
@@ -1301,6 +1549,41 @@ class BinanceBot:
                 f"Scanner stays on {self.symbol} | best={best_candidate.symbol} {best_candidate.score:.1f} | current={current_score:.1f}",
                 "DEBUG",
             )
+
+    def _log_entry_decision(
+        self,
+        *,
+        strategy: str,
+        signal: str,
+        allowed: bool,
+        reason: str,
+        score: float,
+        threshold,
+        market_score: float,
+        detail: str = "",
+        indicators: dict | None = None,
+    ):
+        indicators = indicators or {}
+        self._log(
+            format_decision_trace(
+                "ENTRY_DECISION",
+                symbol=self.symbol,
+                signal=signal,
+                strategy=strategy,
+                score=float(score or 0.0),
+                threshold=float(threshold or 0.0),
+                market_score=float(market_score or 0.0),
+                allowed=allowed,
+                reason=reason,
+                detail=detail,
+                is_lateral=bool(indicators.get("is_lateral", False)),
+                adx=indicators.get("adx"),
+                fluctuation_factor=indicators.get("fluctuation_factor"),
+                balance=round(float(self.balance or 0.0), 4),
+                position_orders=int(self.position_orders),
+            ),
+            "INFO" if allowed else "DEBUG",
+        )
 
     def _log(self, message: str, level: str = "INFO"):
         """Logs bot messages to console and file, and sends Telegram alerts for errors."""

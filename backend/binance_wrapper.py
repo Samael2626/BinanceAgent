@@ -5,6 +5,7 @@ Version: 1.8.0 Stable (c) 2026
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from binance import BinanceSocketManager
+import logging
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Callable
@@ -13,6 +14,14 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP, InvalidOperation
 import asyncio
 import threading
 import time
+
+
+logger = logging.getLogger(__name__)
+
+
+def _reject_order(code: str, detail: str) -> tuple[bool, str]:
+    logger.info("ORDER_VALIDATION_REJECT reason=%s detail=%s", code, detail)
+    return False, f"{code}: {detail}"
 
 
 class BinanceWrapper:
@@ -181,9 +190,9 @@ class BinanceWrapper:
         filters = {f['filterType']: f for f in info['filters']}
 
         if quantity <= 0:
-            return False, "quantity must be greater than zero"
+            return _reject_order("quantity_validation_failed", "quantity must be greater than zero")
         if price <= 0:
-            return False, "price must be greater than zero"
+            return _reject_order("price_validation_failed", "price must be greater than zero")
 
         # 1. LOT_SIZE check (only if not using quote quantity)
         if not is_quote_qty:
@@ -200,7 +209,7 @@ class BinanceWrapper:
                 normalized = self.normalize_quantity(symbol, quantity)
                 step_size = float(lot_filter['stepSize'])
                 if normalized is not None and abs(float(normalized) - float(quantity)) > max(step_size / 10.0, 1e-12):
-                    return False, f"quantity {quantity} does not match stepSize {step_size}"
+                    return _reject_order("step_size_failed", f"quantity {quantity} does not match stepSize {step_size}")
 
         if is_quote_qty:
             market_lot = filters.get('MARKET_LOT_SIZE')
@@ -209,9 +218,9 @@ class BinanceWrapper:
                 max_qty = float(market_lot.get('maxQty', 0) or 0)
                 approx_qty = quantity / price
                 if min_qty > 0 and approx_qty < min_qty:
-                    return False, f"quote amount {quantity:.2f} buys less than MARKET_LOT_SIZE minQty {min_qty}"
+                    return _reject_order("market_lot_size_failed", f"quote amount {quantity:.2f} buys less than MARKET_LOT_SIZE minQty {min_qty}")
                 if max_qty > 0 and approx_qty > max_qty:
-                    return False, f"quote amount {quantity:.2f} exceeds MARKET_LOT_SIZE maxQty {max_qty}"
+                    return _reject_order("market_lot_size_failed", f"quote amount {quantity:.2f} exceeds MARKET_LOT_SIZE maxQty {max_qty}")
 
         # 2. NOTIONAL check
         min_notional = 5.0
@@ -223,7 +232,7 @@ class BinanceWrapper:
         notional = quantity if is_quote_qty else quantity * price
         if notional < min_notional:
             type_str = "Monto" if is_quote_qty else f"Valor ({quantity} * {price})"
-            return False, f"{type_str} {notional:.2f} USDT menor al mínimo permitido de {min_notional} USDT"
+            return _reject_order("min_notional_failed", f"{type_str} {notional:.2f} USDT below minNotional {min_notional} USDT")
 
         return True, "OK"
 
@@ -240,7 +249,16 @@ class BinanceWrapper:
 
             order = self.client.create_order(**params)
             return order
+        except BinanceAPIException as e:
+            logger.error(
+                "ORDER_API_ERROR code=%s message=%s",
+                getattr(e, "code", None),
+                getattr(e, "message", e),
+            )
+            print(f"Error placing order: {e}")
+            raise e
         except Exception as e:
+            logger.error("ORDER_API_ERROR detail=%s", e)
             print(f"Error placing order: {e}")
             raise e
 
