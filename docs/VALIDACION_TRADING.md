@@ -24,13 +24,14 @@ El periodo reservado no cumple las 30 operaciones minimas ni la comparacion con 
 
 El replay de la configuracion guardada (`smart_scalping`, 1m, rotacion de ocho activos) utiliza las funciones de indicadores, estrategia, scanner y riesgo del backend. Usa velas cerradas, una cartera, entrada en la apertura siguiente y costes de estres. Es una aproximacion: OHLCV no revela el orden de los ticks dentro de la vela ni reproduce latencia y libro de ordenes. Falta comparar su registro de decisiones con PAPER en tiempo real.
 
-Muestra exploratoria del 2 de septiembre de 2026: 13 operaciones, PF 0.18, neto -0.38 USDT y caida maxima 0.97%. Un dia no sirve para estimar rentabilidad; confirma que la configuracion guardada tampoco merece activarse ahora.
+Muestra exploratoria del 2 de septiembre de 2026: 13 operaciones, PF 0.18, neto -0.38 USDT y caida maxima 0.97%. Un dia no permite estimar la rentabilidad de la configuracion; falta un replay mas largo y comparacion con PAPER.
 
 ## Barreras implementadas
 
 - El calculo de tamano devuelve cero si el minimo de Binance excede el limite de riesgo; el bot no infla automaticamente la orden.
 - Las senales usan velas cerradas.
 - Cada orden lleva un `newClientOrderId` unico. Si falla la respuesta, el bot consulta ese identificador. Si el estado sigue incierto, guarda la orden pendiente, se detiene y bloquea nuevos envios. Una orden con ejecucion parcial requiere revision antes de reanudar.
+- El backend rechaza toda compra en modo REAL antes de enviarla a Binance mientras el gate este rojo. Las ventas siguen disponibles para cerrar posiciones existentes. El bloqueo exige un cambio de codigo auditado cuando haya evidencia suficiente.
 
 ## Reproduccion
 

@@ -249,6 +249,8 @@ class BinanceWrapper:
         return True, "OK"
 
     def place_order(self, symbol: str, side: str, quantity: float, order_type: str = 'MARKET', quote_order_qty: float = None, client_order_id: str | None = None):
+        if side == "BUY" and not self.testnet:
+            raise RuntimeError("Compras REAL bloqueadas: validacion y auditoria pendientes")
         client_order_id = client_order_id or f"ba{uuid4().hex}"
         try:
             params = {"symbol": symbol, "side": side, "type": order_type,

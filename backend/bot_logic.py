@@ -1133,6 +1133,8 @@ class BinanceBot:
                       price: float, strategy: str,
                       quote_order_qty: float | None = None):
         with self._order_lock:
+            if side == "BUY" and not self.is_testnet:
+                raise RuntimeError("Compras REAL bloqueadas: validacion y auditoria pendientes")
             if self.pending_order:
                 raise OrderStatusUnknown(
                     self.pending_order["symbol"], self.pending_order["client_order_id"])

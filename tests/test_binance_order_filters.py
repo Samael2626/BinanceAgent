@@ -108,6 +108,7 @@ def test_symbol_info_cache_avoids_repeated_exchange_info_calls():
 
 def test_place_order_surfaces_api_errors_without_hiding_them():
     wrapper = BinanceWrapper.__new__(BinanceWrapper)
+    wrapper.testnet = True
     wrapper.normalize_quantity = lambda symbol, quantity: quantity
 
     class FakeClient:
@@ -126,6 +127,7 @@ def test_place_order_surfaces_api_errors_without_hiding_them():
 
 def test_timeout_recovers_order_by_same_client_id_without_resubmitting():
     wrapper = BinanceWrapper.__new__(BinanceWrapper)
+    wrapper.testnet = True
     calls = []
 
     class FakeClient:
@@ -148,6 +150,7 @@ def test_timeout_recovers_order_by_same_client_id_without_resubmitting():
 
 def test_timeout_with_failed_query_keeps_order_status_unknown():
     wrapper = BinanceWrapper.__new__(BinanceWrapper)
+    wrapper.testnet = True
 
     class FakeClient:
         def create_order(self, **params):
@@ -161,6 +164,19 @@ def test_timeout_with_failed_query_keeps_order_status_unknown():
         wrapper.place_order("SOLUSDT", "BUY", 12.0, quote_order_qty=12.0)
     assert exc.exception.symbol == "SOLUSDT"
     assert exc.exception.client_order_id.startswith("ba")
+
+
+def test_wrapper_blocks_real_buy_before_api_call():
+    wrapper = BinanceWrapper.__new__(BinanceWrapper)
+    wrapper.testnet = False
+
+    class FakeClient:
+        def create_order(self, **params):
+            raise AssertionError("real order should not reach Binance")
+
+    wrapper.client = FakeClient()
+    with TestCase().assertRaisesRegex(RuntimeError, "Compras REAL bloqueadas"):
+        wrapper.place_order("SOLUSDT", "BUY", 0.1)
 
 
 def _bot_for_order_test(client):
@@ -177,6 +193,7 @@ def _bot_for_order_test(client):
     bot.client = client
     bot._order_lock = threading.RLock()
     bot.pending_order = {}
+    bot.is_testnet = True
     bot.is_running = True
     bot.enable_buying = True
     bot._log = lambda *args: None
@@ -216,6 +233,19 @@ def test_submission_error_keeps_pending_order_until_reconciled():
     assert bot.is_running is False
 
 
+def test_real_buy_is_blocked_before_submission():
+    class FakeClient:
+        def place_order(self, *args, **kwargs):
+            raise AssertionError("real order should not be submitted")
+
+    bot = _bot_for_order_test(FakeClient())
+    bot.is_testnet = False
+    with TestCase().assertRaisesRegex(RuntimeError, "Compras REAL bloqueadas"):
+        bot._submit_order("SOLUSDT", "BUY", 12.0, 100.0, "AUTO", 12.0)
+    assert bot.pending_order == {}
+    assert bot.db.state == {}
+
+
 def test_confirmed_fill_clears_pending_after_position_update():
     class FakeClient:
         def place_order(self, symbol, side, quantity, **kwargs):
@@ -241,7 +271,9 @@ if __name__ == "__main__":
     test_place_order_surfaces_api_errors_without_hiding_them()
     test_timeout_recovers_order_by_same_client_id_without_resubmitting()
     test_timeout_with_failed_query_keeps_order_status_unknown()
+    test_wrapper_blocks_real_buy_before_api_call()
     test_unknown_order_persists_and_blocks_resubmission()
     test_submission_error_keeps_pending_order_until_reconciled()
+    test_real_buy_is_blocked_before_submission()
     test_confirmed_fill_clears_pending_after_position_update()
     print("binance order filter tests ok")
