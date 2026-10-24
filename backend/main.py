@@ -6,6 +6,7 @@ Architecture: FastAPI / React
 from fastapi import FastAPI, HTTPException, Body, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import secrets
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 from .bot_manager import BotManager
 from .database import DatabaseManager
@@ -107,13 +108,25 @@ async def get_current_user(request: Request):
 
 @app.post("/api/auth/register")
 def register(credentials: dict = Body(...)):
-    """Register a new user with Binance API credentials"""
+    """Register a PAPER user or an account with Binance API credentials."""
     username = credentials.get("username")
-    api_key = credentials.get("api_key")
-    api_secret = credentials.get("api_secret")
+    api_key = credentials.get("api_key") or ""
+    api_secret = credentials.get("api_secret") or ""
     is_testnet = credentials.get("is_testnet", True)
+    execution_mode = credentials.get("execution_mode") or ("TESTNET" if is_testnet else "REAL")
+    if execution_mode not in {"PAPER", "TESTNET", "REAL"}:
+        raise HTTPException(status_code=400, detail="Modo de ejecucion invalido")
+    is_testnet = execution_mode != "REAL"
+    paper_initial = None
+    if execution_mode == "PAPER":
+        try:
+            paper_initial = Decimal(str(credentials.get("paper_initial_usdt", "47")))
+        except InvalidOperation:
+            raise HTTPException(status_code=400, detail="Capital PAPER invalido")
+        if not paper_initial.is_finite() or not 0 < paper_initial <= 1_000_000:
+            raise HTTPException(status_code=400, detail="Capital PAPER fuera de rango")
 
-    if not all([username, api_key, api_secret]):
+    if not username or (execution_mode != "PAPER" and not all([api_key, api_secret])):
         raise HTTPException(
             status_code=400,
             detail="Faltan datos: username, api_key y api_secret son requeridos"
@@ -126,7 +139,10 @@ def register(credentials: dict = Body(...)):
 
     try:
         # Create user in database
-        user_id = db.create_user(username, api_key, api_secret, is_testnet)
+        user_id = db.create_user(username, api_key or "", api_secret or "", is_testnet)
+        db.save_setting("execution_mode", execution_mode, user_id=user_id)
+        if paper_initial is not None:
+            db.save_setting("paper_initial_usdt", str(paper_initial), user_id=user_id)
 
         # Create bot instance and validate credentials
         bot = bot_manager.get_or_create_bot(
@@ -136,7 +152,7 @@ def register(credentials: dict = Body(...)):
         session_token = secrets.token_urlsafe(32)
         db.set_user_session(user_id, session_token)
 
-        mode = "Testnet (Simulación)" if is_testnet else "⚠️ CUENTA REAL"
+        mode = "PAPER (saldo virtual)" if execution_mode == "PAPER" else "Testnet (Simulación)" if is_testnet else "⚠️ CUENTA REAL"
 
         return {
             "status": "success",
@@ -145,7 +161,8 @@ def register(credentials: dict = Body(...)):
             "user": {
                 "id": user_id,
                 "username": username,
-                "is_testnet": is_testnet
+                "is_testnet": is_testnet,
+                "execution_mode": execution_mode
             }
         }
     except Exception as e:
@@ -180,7 +197,8 @@ def login(credentials: dict = Body(...)):
         session_token = secrets.token_urlsafe(32)
         db.set_user_session(user['id'], session_token)
 
-        mode = "Testnet (Simulación)" if user['is_testnet'] else "⚠️ CUENTA REAL"
+        execution_mode = db.get_setting("execution_mode", "TESTNET" if user['is_testnet'] else "REAL", user_id=user['id'])
+        mode = "PAPER (saldo virtual)" if execution_mode == "PAPER" else "Testnet (Simulación)" if user['is_testnet'] else "⚠️ CUENTA REAL"
 
         return {
             "status": "success",
@@ -189,7 +207,8 @@ def login(credentials: dict = Body(...)):
             "user": {
                 "id": user['id'],
                 "username": user['username'],
-                "is_testnet": user['is_testnet']
+                "is_testnet": user['is_testnet'],
+                "execution_mode": execution_mode
             }
         }
     except Exception as e:
@@ -216,7 +235,8 @@ def get_current_user_info(user: dict = Depends(get_current_user)):
     return {
         "id": user['id'],
         "username": user['username'],
-        "is_testnet": user['is_testnet']
+        "is_testnet": user['is_testnet'],
+        "execution_mode": db.get_setting("execution_mode", "TESTNET" if user['is_testnet'] else "REAL", user_id=user['id'])
     }
 
 
@@ -238,6 +258,14 @@ def get_bot_status(user: dict = Depends(get_current_user)):
     if not bot:
         raise HTTPException(status_code=404, detail="Bot no inicializado")
     return bot.get_status()
+
+
+@app.get("/api/paper/report")
+def get_paper_report(user: dict = Depends(get_current_user)):
+    bot = bot_manager.get_bot(user['id'])
+    if not bot or not bot.is_paper:
+        raise HTTPException(status_code=404, detail="Cuenta PAPER no disponible")
+    return bot.client.report()
 
 
 @app.get("/api/tickers")
@@ -302,7 +330,7 @@ def test_connection(user: dict = Depends(get_current_user)):
         usdt_balance = bot.client.get_account_balance("USDT")
         btc_balance = bot.client.get_account_balance("BTC")
 
-        mode = "Testnet (Simulación)" if bot.is_testnet else "⚠️ CUENTA REAL"
+        mode = "PAPER (saldo virtual)" if bot.is_paper else "Testnet (Simulación)" if bot.is_testnet else "⚠️ CUENTA REAL"
 
         return {
             "connected": True,
@@ -319,7 +347,7 @@ def test_connection(user: dict = Depends(get_current_user)):
         return {
             "connected": False,
             "message": f"Error de conexión: {str(e)}",
-            "mode": "Testnet (Simulación)" if bot.is_testnet else "⚠️ CUENTA REAL"
+            "mode": "PAPER (saldo virtual)" if bot.is_paper else "Testnet (Simulación)" if bot.is_testnet else "⚠️ CUENTA REAL"
         }
 
 

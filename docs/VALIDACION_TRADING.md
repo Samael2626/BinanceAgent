@@ -46,3 +46,5 @@ python -m harness.replay_spot --data-dir harness/data --config harness/data/conf
 ```
 
 Antes de considerar REAL: replay completo de periodos no usados para ajustar, costes y fallos de red bajo estres, comparacion aleatoria predefinida, al menos 30 dias de PAPER con decisiones y ejecuciones cotejadas, pruebas verdes y aprobacion del auditor. Consultar balance Spot justo antes de cualquier decision; la instantanea de julio es obsoleta.
+
+El modo PAPER nuevo usa libro de ordenes Spot Mainnet y cartera virtual persistente. El modelo de ejecucion, costes, registros y limites estan en `docs/PAPER_REALISTA.md`. Su existencia no cambia el gate ROJO.

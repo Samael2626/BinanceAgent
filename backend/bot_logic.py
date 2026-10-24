@@ -9,6 +9,7 @@ import threading
 from uuid import uuid4
 from datetime import datetime
 from .binance_wrapper import BinanceWrapper, OrderStatusUnknown
+from .paper_broker import PaperBroker
 from .config import API_KEY, API_SECRET, TELEGRAM_BOT_TOKEN, TRADING_MODE
 from .database import DatabaseManager
 from .decision_trace import (
@@ -60,6 +61,7 @@ class BinanceBot:
         self.timeframe = sanitize_timeframe(self.db.get_setting(
             "timeframe", "5m", user_id=user_id))
         self.client = None
+        self.is_paper = False
         self.current_price = 0.0
         self.balance = 0.0
         self.crypto_balance = 0.0
@@ -353,6 +355,17 @@ class BinanceBot:
         """Initializes the Binance client and starts background services."""
         try:
             self._log("Validating credentials...", "DEBUG")
+            if self.db.get_setting("execution_mode", "", user_id=self.user_id) == "PAPER":
+                self.client = PaperBroker(self.db, self.user_id)
+                self.data_client = self.client
+                self.is_testnet = True
+                self.is_paper = True
+                self.testnet_commission_pct = float(self.client.fee_pct)
+                self.market_data_service = MarketDataService(self.data_client)
+                self._update_account_balances()
+                threading.Thread(target=self._finish_initialization, daemon=True).start()
+                self._log("PAPER conectado a datos publicos Spot", "INFO")
+                return True
 
             # CRITICAL: Sanitize credentials to prevent APIError -1100 (illegal characters)
             # Remove whitespace, newlines, and other non-alphanumeric characters
@@ -412,11 +425,12 @@ class BinanceBot:
             # Kline socket always uses data_client (which might be the same as client)
             self.data_client.start_kline_socket(
                 self.symbol, self.timeframe, self._on_kline_msg)
-            try:
-                self.client.start_user_socket(self._on_user_msg)
-                self._log("✅ User WebSocket connected", "DEBUG")
-            except Exception as ws_error:
-                self._log(f"⚠️ User WebSocket failed: {ws_error}", "WARNING")
+            if not self.is_paper:
+                try:
+                    self.client.start_user_socket(self._on_user_msg)
+                    self._log("✅ User WebSocket connected", "DEBUG")
+                except Exception as ws_error:
+                    self._log(f"⚠️ User WebSocket failed: {ws_error}", "WARNING")
 
             if not self.monitor_active:
                 self.monitor_active = True
@@ -424,7 +438,7 @@ class BinanceBot:
 
             self._update_account_balances()
             self._log(
-                f"✅ Binance Client fully initialized ({'Testnet' if self.is_testnet else 'REAL ACCOUNT'})")
+                f"✅ Binance Client fully initialized ({'PAPER' if self.is_paper else 'Testnet' if self.is_testnet else 'REAL ACCOUNT'})")
         except Exception as e:
             self._log(f"Error during background initialization: {e}", "ERROR")
 
@@ -1006,20 +1020,34 @@ class BinanceBot:
             quote_qty / executed_qty if executed_qty > 0 else price)
 
         commission = 0.0
+        quote_fee = 0.0
         final_qty = executed_qty
-        if self.is_testnet:
+        if self.is_paper:
+            fills = trade.get("fills", [])
+            base_asset = trade["symbol"].removesuffix("USDT")
+            base_fee = sum(float(fill.get("commission", 0)) for fill in fills
+                           if fill.get("commissionAsset") == base_asset)
+            quote_fee = sum(float(fill.get("commission", 0)) for fill in fills
+                            if fill.get("commissionAsset") == "USDT")
+            commission = quote_fee + base_fee * actual_price
+            if side == "BUY":
+                final_qty = executed_qty - base_fee
+        elif self.is_testnet:
             commission = (
                 executed_qty * (self.testnet_commission_pct / 100)) * actual_price
             if side == "BUY":
                 final_qty = executed_qty * \
                     (1 - self.testnet_commission_pct / 100)
 
-        pnl = (actual_price - self.entry_price) * \
-            executed_qty if side == "SELL" and self.entry_price > 0 else 0.0
+        pnl = 0.0
+        if side == "SELL" and self.entry_price > 0:
+            pnl = (quote_qty - quote_fee - self.entry_price * executed_qty
+                   if self.is_paper else
+                   (actual_price - self.entry_price) * executed_qty)
 
         if side == "BUY":
             new_val = (self.accumulated_qty * self.entry_price) + \
-                (actual_price * final_qty)
+                (quote_qty if self.is_paper else actual_price * final_qty)
             new_qty = self.accumulated_qty + final_qty
             self.entry_price = new_val / new_qty if new_qty > 0 else actual_price
             self.accumulated_qty = new_qty
@@ -1087,6 +1115,8 @@ class BinanceBot:
         self.trades.insert(0, trade_entry)
         self.db.save_trade(trade_entry, user_id=self.user_id)
         self._send_trade_notification(trade_entry)
+        if self.is_paper:
+            self._update_account_balances()
 
         # Requirement: Print block after execution
         self._print_state_snapshot()
@@ -1178,7 +1208,15 @@ class BinanceBot:
                 raise
             except Exception:
                 if self.pending_order:
-                    self._halt_for_pending_order()
+                    if self.is_paper:
+                        try:
+                            self.client.get_order_by_client_id(symbol, client_order_id)
+                        except KeyError:
+                            self._clear_pending_order()
+                        else:
+                            self._halt_for_pending_order()
+                    else:
+                        self._halt_for_pending_order()
                 raise
 
     def _place_buy_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO", is_quote: bool = False):
@@ -1891,7 +1929,7 @@ class BinanceBot:
             net_pnl = sum([t.get('pnl', 0) for t in self.trades])
 
             return {
-                "is_running": self.is_running, "symbol": self.symbol, "mode": "TESTNET" if self.is_testnet else "REAL",
+                "is_running": self.is_running, "symbol": self.symbol, "mode": "PAPER" if self.is_paper else "TESTNET" if self.is_testnet else "REAL",
                 "price": round(self.current_price, 2), "balance": round(self.balance, 2), "crypto_balance": round(self.crypto_balance, 6),
                 "entry_price": round(self.entry_price, 6), "accumulated_qty": round(self.accumulated_qty, 8),
                 "pnl": round(self.pnl, 2), "daily_pnl": round(self.daily_pnl, 2), "rsi": round(self.rsi, 2), "ema_200": round(self.trend_ema, 2),

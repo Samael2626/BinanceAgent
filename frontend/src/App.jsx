@@ -602,6 +602,12 @@ function App() {
       {/* New Top Status Bar */}
       <StatusCard botStatus={botStatus} formatMoney={formatMoney} />
 
+      {botStatus.mode === 'PAPER' && (
+        <div className="live-warning-banner" style={{ background: 'rgba(76, 175, 80, 0.12)', color: '#4caf50' }}>
+          PAPER · Saldo virtual. Precios de Binance Spot; ninguna orden se envía al mercado.
+        </div>
+      )}
+
       {botStatus.mode === 'REAL' && (
         <div className="live-warning-banner">
           ⚠️ EJECUTANDO EN CUENTA REAL - FONDOS REALES EN RIESGO ⚠️

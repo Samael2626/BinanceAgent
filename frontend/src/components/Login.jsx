@@ -5,7 +5,9 @@ const Login = ({ onLoginSuccess }) => {
   const [username, setUsername] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
-  const [isTestnet, setIsTestnet] = useState(true);
+  const [executionMode, setExecutionMode] = useState('PAPER');
+  const [paperInitialUsdt, setPaperInitialUsdt] = useState('47');
+  const isTestnet = executionMode !== 'REAL';
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -16,7 +18,10 @@ const Login = ({ onLoginSuccess }) => {
 
     const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
     const payload = mode === 'register' 
-      ? { username, api_key: apiKey, api_secret: apiSecret, is_testnet: isTestnet }
+      ? { username, api_key: executionMode === 'PAPER' ? '' : apiKey,
+          api_secret: executionMode === 'PAPER' ? '' : apiSecret,
+          is_testnet: isTestnet, execution_mode: executionMode,
+          paper_initial_usdt: executionMode === 'PAPER' ? paperInitialUsdt : undefined }
       : { username };
 
     try {
@@ -61,7 +66,7 @@ const Login = ({ onLoginSuccess }) => {
             border: `1px solid ${isTestnet ? '#4caf50' : '#f44336'}`
           }}>
             <p style={{ color: isTestnet ? '#4caf50' : '#f44336', textAlign: 'center', margin: 0, fontWeight: 'bold' }}>
-              {isTestnet ? 'MODO TESTNET (SIMULACIÓN)' : '⚠️ CUIDADO: MODO CUENTA REAL ⚠️'}
+              {executionMode === 'PAPER' ? 'PAPER: mercado real, saldo virtual' : isTestnet ? 'MODO TESTNET (SIMULACIÓN)' : '⚠️ CUIDADO: MODO CUENTA REAL ⚠️'}
             </p>
           </div>
         )}
@@ -85,15 +90,32 @@ const Login = ({ onLoginSuccess }) => {
                 <label>Entorno de Trading</label>
                 <select 
                   className="login-input" 
-                  value={isTestnet ? 'testnet' : 'real'}
-                  onChange={(e) => setIsTestnet(e.target.value === 'testnet')}
+                  value={executionMode}
+                  onChange={(e) => setExecutionMode(e.target.value)}
                   style={{ width: '100%', cursor: 'pointer' }}
                 >
-                  <option value="testnet">Binance Testnet (Recomendado para pruebas)</option>
-                  <option value="real">Binance Real (Cuenta Live - Dinero Real)</option>
+                  <option value="PAPER">PAPER (mercado real, saldo virtual)</option>
+                  <option value="TESTNET">Binance Testnet</option>
+                  <option value="REAL">Binance Real (dinero real)</option>
                 </select>
               </div>
 
+              {executionMode === 'PAPER' && <div className="form-group" style={{ marginTop: '20px' }}>
+                <label>Capital virtual inicial (USDT)</label>
+                <input
+                  type="number"
+                  min="0.01"
+                  max="1000000"
+                  step="0.01"
+                  value={paperInitialUsdt}
+                  onChange={(e) => setPaperInitialUsdt(e.target.value)}
+                  required
+                  className="login-input"
+                />
+                <small>Es dinero simulado; no refleja tu saldo de Binance.</small>
+              </div>}
+
+              {executionMode !== 'PAPER' && <>
               <div className="form-group" style={{ marginTop: '20px' }}>
                 <label>API Key de Binance</label>
                 <input
@@ -117,6 +139,7 @@ const Login = ({ onLoginSuccess }) => {
                   className="login-input"
                 />
               </div>
+              </>}
             </>
           )}
           
@@ -151,7 +174,7 @@ const Login = ({ onLoginSuccess }) => {
             disabled={loading}
           >
             {loading ? 'Procesando...' : mode === 'register' 
-              ? (isTestnet ? 'Registrar en Testnet' : 'REGISTRAR EN CUENTA REAL')
+              ? (executionMode === 'PAPER' ? 'Crear cuenta PAPER' : isTestnet ? 'Registrar en Testnet' : 'REGISTRAR EN CUENTA REAL')
               : 'Iniciar Sesión'}
           </button>
         </form>

@@ -194,6 +194,7 @@ def _bot_for_order_test(client):
     bot._order_lock = threading.RLock()
     bot.pending_order = {}
     bot.is_testnet = True
+    bot.is_paper = False
     bot.is_running = True
     bot.enable_buying = True
     bot._log = lambda *args: None
@@ -231,6 +232,23 @@ def test_submission_error_keeps_pending_order_until_reconciled():
         bot._submit_order("SOLUSDT", "BUY", 12.0, 100.0, "AUTO", 12.0)
     assert bot.pending_order == bot.db.state["pending_order"]
     assert bot.is_running is False
+
+
+def test_known_paper_rejection_clears_pending_without_halting():
+    class FakeClient:
+        def place_order(self, *args, **kwargs):
+            raise ValueError("profundidad insuficiente")
+
+        def get_order_by_client_id(self, symbol, client_order_id):
+            raise KeyError(client_order_id)
+
+    bot = _bot_for_order_test(FakeClient())
+    bot.is_paper = True
+    with TestCase().assertRaisesRegex(ValueError, "profundidad insuficiente"):
+        bot._submit_order("SOLUSDT", "BUY", 12.0, 100.0, "AUTO", 12.0)
+    assert bot.pending_order == {}
+    assert bot.db.state["pending_order"] == {}
+    assert bot.is_running is True
 
 
 def test_real_buy_is_blocked_before_submission():
@@ -274,6 +292,7 @@ if __name__ == "__main__":
     test_wrapper_blocks_real_buy_before_api_call()
     test_unknown_order_persists_and_blocks_resubmission()
     test_submission_error_keeps_pending_order_until_reconciled()
+    test_known_paper_rejection_clears_pending_without_halting()
     test_real_buy_is_blocked_before_submission()
     test_confirmed_fill_clears_pending_after_position_update()
     print("binance order filter tests ok")
