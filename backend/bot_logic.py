@@ -6,8 +6,9 @@ import pandas as pd
 import pandas_ta as ta
 import time
 import threading
+from uuid import uuid4
 from datetime import datetime
-from .binance_wrapper import BinanceWrapper
+from .binance_wrapper import BinanceWrapper, OrderStatusUnknown
 from .config import API_KEY, API_SECRET, TELEGRAM_BOT_TOKEN, TRADING_MODE
 from .database import DatabaseManager
 from .decision_trace import (
@@ -38,7 +39,7 @@ from .strategies.breakout_volume import BreakoutVolumeStrategy
 from .strategies.smart_scalper import SmartScalperStrategy
 
 from .predictive_modules import PredictiveEngine
-from .services.market_data import MarketDataService
+from .services.market_data import MarketDataService, closed_klines
 
 
 class BinanceBot:
@@ -141,6 +142,14 @@ class BinanceBot:
             self.enable_buying = _to_bool(self.enable_buying)
         if not isinstance(self.enable_selling, bool):
             self.enable_selling = _to_bool(self.enable_selling)
+        self._order_lock = threading.RLock()
+        self.pending_order = self.db.get_state(
+            "pending_order", {}, is_json=True, user_id=user_id) or {}
+        if self.pending_order:
+            self.is_running = False
+            self.enable_buying = False
+            self.db.save_state("is_running", "False", user_id=user_id)
+            self.db.save_state("enable_buying", False, user_id=user_id)
 
         # New Quantitative Filter Controls
         self.enable_trend_filter = self.db.get_setting(
@@ -284,6 +293,11 @@ class BinanceBot:
         # Predictive Module State
         self.predictive_engine = PredictiveEngine()
         self.prediction = {}
+        if self.pending_order:
+            self._log(
+                f"ORDER_PENDING_REVIEW client_order_id={self.pending_order['client_order_id']}",
+                "ERROR",
+            )
 
     def _get_scoped_key(self, key: str) -> str:
         """Returns a key scoped to the current symbol for state persistence."""
@@ -494,6 +508,7 @@ class BinanceBot:
                 df = self.data_client.get_historical_klines(
                     self.symbol, self.timeframe, limit=1000)
 
+            df = closed_klines(df).tail(999)
             if df.empty:
                 return False
 
@@ -1078,9 +1093,100 @@ class BinanceBot:
 
         return trade
 
+    def _clear_pending_order(self) -> None:
+        self.db.save_state("pending_order", {}, user_id=self.user_id)
+        self.pending_order = {}
+
+    def _halt_for_pending_order(self) -> None:
+        self.is_running = False
+        self.enable_buying = False
+        self.db.save_state("is_running", "False", user_id=self.user_id)
+        self.db.save_state("enable_buying", False, user_id=self.user_id)
+        self._log(
+            f"ORDER_PENDING_REVIEW client_order_id={self.pending_order['client_order_id']}",
+            "ERROR",
+        )
+
+    def reconcile_pending_order(self) -> dict:
+        with self._order_lock:
+            if not self.pending_order:
+                return {"status": "none"}
+            pending = self.pending_order
+            order = self.client.get_order_by_client_id(
+                pending["symbol"], pending["client_order_id"])
+            status = order.get("status", "UNKNOWN")
+            executed_qty = float(order.get("executedQty", 0))
+            if status in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"} and executed_qty == 0:
+                self._clear_pending_order()
+                self._log(
+                    f"ORDER_RECONCILED_NO_FILL client_order_id={pending['client_order_id']}",
+                    "WARNING",
+                )
+                return {"status": status, "executed_qty": 0.0, "review_required": False}
+            self._log(
+                f"ORDER_REVIEW_REQUIRED client_order_id={pending['client_order_id']} status={status} executed_qty={executed_qty}",
+                "ERROR",
+            )
+            return {"status": status, "executed_qty": executed_qty, "review_required": True}
+
+    def _submit_order(self, symbol: str, side: str, quantity: float,
+                      price: float, strategy: str,
+                      quote_order_qty: float | None = None):
+        with self._order_lock:
+            if self.pending_order:
+                raise OrderStatusUnknown(
+                    self.pending_order["symbol"], self.pending_order["client_order_id"])
+
+            client_order_id = f"ba{uuid4().hex}"
+            pending = {
+                "client_order_id": client_order_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "quote_order_qty": quote_order_qty,
+                "strategy": strategy,
+                "price": price,
+            }
+            self.db.save_state("pending_order", pending, user_id=self.user_id)
+            self.pending_order = pending
+
+            try:
+                trade = self.client.place_order(
+                    symbol, side, quantity, quote_order_qty=quote_order_qty,
+                    client_order_id=client_order_id)
+                if not trade:
+                    raise OrderStatusUnknown(symbol, client_order_id)
+
+                status = trade.get("status")
+                executed_qty = float(trade.get("executedQty", 0))
+                if status in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"} and executed_qty == 0:
+                    self._clear_pending_order()
+                    raise RuntimeError(f"Order {client_order_id} closed without execution")
+                if status not in {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"} or executed_qty <= 0:
+                    raise OrderStatusUnknown(symbol, client_order_id)
+
+                result = self._handle_trade_execution(
+                    trade, side, strategy, quantity, price)
+                if not result:
+                    raise OrderStatusUnknown(symbol, client_order_id)
+                self._clear_pending_order()
+                return result
+            except OrderStatusUnknown:
+                self._halt_for_pending_order()
+                raise
+            except Exception:
+                if self.pending_order:
+                    self._halt_for_pending_order()
+                raise
+
     def _place_buy_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO", is_quote: bool = False):
         """Validates and places a BUY order on Binance."""
         try:
+            if self.pending_order:
+                raise OrderStatusUnknown(
+                    self.pending_order["symbol"], self.pending_order["client_order_id"])
+            if quantity <= 0:
+                return None, "tamano de orden bloqueado por riesgo"
             if self.sniper_mode:
                 # Calculate All-In amount
                 quantity = self.balance * \
@@ -1095,7 +1201,7 @@ class BinanceBot:
                 # Try to adjust to min notional if it failed validation
                 adj = self.client.adjust_to_min_notional(
                     symbol, quantity, price, is_quote_qty=is_quote)
-                if adj:
+                if adj and (not self.auto_position_sizing or strategy == "MANUAL"):
                     self._log(
                         format_decision_trace(
                             "ORDER_DECISION",
@@ -1194,27 +1300,10 @@ class BinanceBot:
                 ),
                 "INFO",
             )
-            trade = self.client.place_order(
-                symbol, "BUY", quantity, quote_order_qty=quantity if is_quote else None)
-
-            if not trade:
-                err_msg = "Buy order returned None (Check logs for details)"
-                self._log(
-                    format_decision_trace(
-                        "ORDER_DECISION",
-                        symbol=symbol,
-                        side="BUY",
-                        allowed=False,
-                        reason="order_returned_none",
-                        qty=quantity,
-                        price=price,
-                    ),
-                    "ERROR",
-                )
-                self._log(f"❌ {err_msg}", "ERROR")
-                return None, err_msg
-
-            return self._handle_trade_execution(trade, "BUY", strategy, quantity, price), None
+            result = self._submit_order(
+                symbol, "BUY", quantity, price, strategy,
+                quote_order_qty=quantity if is_quote else None)
+            return result, None
         except Exception as e:
             err_msg = f"Exception in _place_buy_order: {str(e)}"
             self._log(
@@ -1236,6 +1325,9 @@ class BinanceBot:
     def _place_sell_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO"):
         """Validates and places a SELL order on Binance."""
         try:
+            if self.pending_order:
+                raise OrderStatusUnknown(
+                    self.pending_order["symbol"], self.pending_order["client_order_id"])
             # 1. Sanity check: quantity to sell vs balance
             if quantity > self.crypto_balance:
                 self._log(
@@ -1278,14 +1370,8 @@ class BinanceBot:
 
             self._log(
                 f"📤 Enviando venta: {quantity} {symbol} @ {price} ({strategy})", "INFO")
-            trade = self.client.place_order(symbol, "SELL", quantity)
-
-            if not trade:
-                err_msg = "Sell order returned None (Check logs for details)"
-                self._log(f"❌ {err_msg}", "ERROR")
-                return None, err_msg
-
-            return self._handle_trade_execution(trade, "SELL", strategy, quantity, price), None
+            result = self._submit_order(symbol, "SELL", quantity, price, strategy)
+            return result, None
         except Exception as e:
             err_msg = f"Exception in _place_sell_order: {str(e)}"
             self._log(f"❌ {err_msg}", "ERROR")
@@ -1341,7 +1427,7 @@ class BinanceBot:
         )
         if quote_qty > 0:
             return quote_qty
-        return float(self.trade_qty) if self.trade_qty_type == "quote" else float(self.trade_qty) * max(self.current_price, 1.0)
+        return 0.0
 
     def _has_open_position(self) -> bool:
         reference_price = self.current_price if self.current_price > 0 else self.entry_price
@@ -1349,6 +1435,8 @@ class BinanceBot:
 
     def _switch_symbol(self, new_symbol: str, reason: str = "") -> bool:
         if not new_symbol or new_symbol == self.symbol:
+            return False
+        if self.pending_order:
             return False
         if self._has_open_position():
             return False
@@ -1406,6 +1494,7 @@ class BinanceBot:
                 df = self.market_data_service.get_historical_data(
                     symbol, self.timeframe, limit=300) if self.market_data_service else self.data_client.get_historical_klines(
                     symbol, self.timeframe, limit=300)
+                df = closed_klines(df).tail(299)
 
                 if df is None or df.empty:
                     decision = build_scanner_decision(
@@ -1759,6 +1848,9 @@ class BinanceBot:
             return {"status": "error", "message": str(e)}
 
     def start(self):
+        if self.pending_order:
+            self._halt_for_pending_order()
+            return {"status": "error", "message": "Orden pendiente de conciliacion"}
         self.is_running = True
         self.db.save_state("is_running", "True", user_id=self.user_id)
         self._log("🚀 Bot iniciado manualmente/auto", "INFO")
@@ -1805,6 +1897,7 @@ class BinanceBot:
                 "bb_upper": round(self.bb_upper, 2), "bb_lower": round(self.bb_lower, 2), "current_vol": round(self.current_vol, 2),
                 "history": self.history, "trades": self.trades, "settings": self.get_settings(), "prediction": getattr(self, 'prediction', {}),
                 "last_buy_block_reason": self.last_buy_block_reason, "last_buy_signal_score": self.last_buy_signal_score,
+                "pending_order": self.pending_order,
                 "scanner": {"last_scan_at": self._last_rotation_scan_at, "candidates": self._rotation_candidates},
                 "stats": {"wins": wins, "losses": losses, "win_rate": round(wr, 1), "net_pnl": round(net_pnl, 2), "daily_pnl": round(self.daily_pnl, 2)}
             }

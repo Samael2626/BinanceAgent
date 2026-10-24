@@ -44,6 +44,20 @@ def test_calculate_position_quote_size_returns_zero_when_balance_below_minimum()
     assert size == 0.0
 
 
+def test_minimum_order_never_overrides_risk_cap():
+    size = calculate_position_quote_size(
+        equity=47.0,
+        current_price=100.0,
+        stop_loss_pct=6.0,
+        atr=0.0,
+        risk_per_trade_pct=0.75,
+        atr_stop_mult=1.5,
+        min_order_quote=10.0,
+        max_position_pct=25.0,
+    )
+    assert size == 0.0
+
+
 def test_should_halt_buying_on_loss_guard():
     blocked, reason = should_halt_buying(
         daily_pnl=-60.0,
@@ -73,6 +87,7 @@ if __name__ == "__main__":
     test_sanitize_timeframe()
     test_calculate_position_quote_size_caps_to_equity()
     test_calculate_position_quote_size_returns_zero_when_balance_below_minimum()
+    test_minimum_order_never_overrides_risk_cap()
     test_should_halt_buying_on_loss_guard()
     test_should_trigger_portfolio_kill_switch()
     print("risk tests ok")

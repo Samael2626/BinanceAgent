@@ -13,6 +13,17 @@ from backend.binance_wrapper import BinanceWrapper
 logger = logging.getLogger(__name__)
 
 
+def closed_klines(frame: pd.DataFrame, now: pd.Timestamp | None = None) -> pd.DataFrame:
+    if frame is None:
+        raise ValueError("historical klines unavailable")
+    if frame.empty:
+        return frame
+    if "close_time" not in frame.columns:
+        raise ValueError("historical klines missing close_time")
+    current = now if now is not None else pd.Timestamp.now(tz="UTC")
+    return frame.loc[frame["close_time"] < current]
+
+
 class MarketDataService:
     """
     The Eyes of the System.

@@ -86,6 +86,8 @@ class PredictiveEngine:
 
         close = df['close'].iloc[-1]
         ema = df['EMA_200'].iloc[-1]
+        if pd.isna(ema) or ema <= 0:
+            return {"score": 50, "label": "Neutral"}
         dist = abs(close - ema) / ema * 100
 
         score = min(100, dist * 10)  # 10% de distancia = 100 score
@@ -97,6 +99,8 @@ class PredictiveEngine:
     def _calculate_fear_greed(self, df: pd.DataFrame) -> dict:
         """Estima sentimiento de Miedo vs Codicia basado en RSI y Volatilidad."""
         rsi = df[f'RSI_{self.RSI_PERIOD}'].iloc[-1] if f'RSI_{self.RSI_PERIOD}' in df.columns else 50
+        if pd.isna(rsi):
+            rsi = 50
 
         score = rsi  # Base
         if rsi > 75:
@@ -301,6 +305,8 @@ class PredictiveEngine:
 
         column_rsi = f'RSI_{self.RSI_PERIOD}'
         rsi = df[column_rsi].iloc[-1] if column_rsi in df.columns else 50
+        if pd.isna(rsi):
+            rsi = 50
 
         # Si el RSI está en zona neutral (40-60), hay espacio para moverse.
         if 40 <= rsi <= 60:
@@ -339,6 +345,8 @@ class PredictiveEngine:
 
         # Componente RSI
         rsi = df[column_rsi].iloc[-1] if column_rsi in df.columns else 50
+        if pd.isna(rsi):
+            rsi = 50
         if rsi > 50:
             score += 10
         if rsi > self.RSI_OVERBOUGHT:
@@ -349,6 +357,8 @@ class PredictiveEngine:
         # Componente de Tendencia (EMA)
         close = df['close'].iloc[-1]
         ema = df['EMA_200'].iloc[-1] if 'EMA_200' in df.columns else close
+        if pd.isna(ema):
+            ema = close
         if close > ema:
             score += 20  # Precio sobre la media de 200 = Tendencia Alcista sana
         else:

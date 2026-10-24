@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import floor
 from typing import Tuple
 import time
 
@@ -55,8 +56,9 @@ def calculate_position_quote_size(
     quote_size = risk_capital / max(stop_pct / 100.0, 0.0025)
     hard_cap = equity * max(float(max_position_pct or 0), 1.0) / 100.0
     quote_size = min(quote_size, hard_cap, spendable_equity)
-    quote_size = max(float(min_order_quote or 0), quote_size)
-    return round(quote_size, 2)
+    if quote_size < float(min_order_quote or 0):
+        return 0.0
+    return floor(quote_size * 100) / 100
 
 
 def should_halt_buying(

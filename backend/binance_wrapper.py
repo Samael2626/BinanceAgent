@@ -14,9 +14,20 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP, InvalidOperation
 import asyncio
 import threading
 import time
+from uuid import uuid4
+
+from requests.exceptions import ConnectionError as RequestConnectionError
+from requests.exceptions import Timeout as RequestTimeout
 
 
 logger = logging.getLogger(__name__)
+
+
+class OrderStatusUnknown(RuntimeError):
+    def __init__(self, symbol: str, client_order_id: str):
+        self.symbol = symbol
+        self.client_order_id = client_order_id
+        super().__init__(f"Order status unknown: {symbol} {client_order_id}")
 
 
 def _reject_order(code: str, detail: str) -> tuple[bool, str]:
@@ -75,11 +86,12 @@ class BinanceWrapper:
 
             # Convert timestamp to datetime
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df['close_time'] = pd.to_datetime(df['close_time'], unit='ms', utc=True)
 
             # Set index but KEEP timestamp as a column for easier access if needed
             df.set_index('timestamp', inplace=True, drop=False)
 
-            return df[numeric_cols + ['timestamp']]
+            return df[numeric_cols + ['timestamp', 'close_time']]
 
         except BinanceAPIException as e:
             print(f"Binance API Exception in get_historical_klines: {e}")
@@ -236,9 +248,11 @@ class BinanceWrapper:
 
         return True, "OK"
 
-    def place_order(self, symbol: str, side: str, quantity: float, order_type: str = 'MARKET', quote_order_qty: float = None):
+    def place_order(self, symbol: str, side: str, quantity: float, order_type: str = 'MARKET', quote_order_qty: float = None, client_order_id: str | None = None):
+        client_order_id = client_order_id or f"ba{uuid4().hex}"
         try:
-            params = {"symbol": symbol, "side": side, "type": order_type}
+            params = {"symbol": symbol, "side": side, "type": order_type,
+                      "newClientOrderId": client_order_id, "newOrderRespType": "FULL"}
             if quote_order_qty:
                 params["quoteOrderQty"] = "{:.8f}".format(
                     float(quote_order_qty)).rstrip('0').rstrip('.')
@@ -250,6 +264,8 @@ class BinanceWrapper:
             order = self.client.create_order(**params)
             return order
         except BinanceAPIException as e:
+            if getattr(e, "code", None) == -1007:
+                return self._recover_order(symbol, client_order_id)
             logger.error(
                 "ORDER_API_ERROR code=%s message=%s",
                 getattr(e, "code", None),
@@ -257,10 +273,29 @@ class BinanceWrapper:
             )
             print(f"Error placing order: {e}")
             raise e
+        except (RequestTimeout, RequestConnectionError):
+            return self._recover_order(symbol, client_order_id)
         except Exception as e:
             logger.error("ORDER_API_ERROR detail=%s", e)
             print(f"Error placing order: {e}")
             raise e
+
+    def _recover_order(self, symbol: str, client_order_id: str) -> dict:
+        try:
+            order = self.get_order_by_client_id(symbol, client_order_id)
+            if order.get("status") in {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"}:
+                return order
+        except Exception as exc:
+            logger.error(
+                "ORDER_RECONCILE_ERROR symbol=%s client_order_id=%s error_type=%s code=%s",
+                symbol, client_order_id, type(exc).__name__, getattr(exc, "code", None),
+            )
+        logger.error("ORDER_STATUS_UNKNOWN symbol=%s client_order_id=%s", symbol, client_order_id)
+        raise OrderStatusUnknown(symbol, client_order_id)
+
+    def get_order_by_client_id(self, symbol: str, client_order_id: str) -> dict:
+        return self.client.get_order(
+            symbol=symbol, origClientOrderId=client_order_id)
 
     def start_kline_socket(self, symbol: str, interval: str, callback: Callable):
         """Starts a kline socket for the given symbol and interval with auto-reconnect."""
