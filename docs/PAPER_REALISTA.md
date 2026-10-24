@@ -18,3 +18,5 @@ Este modelo aproxima una orden MARKET pequena. El libro REST no incluye la hora 
 ## Verificacion y siguiente gate
 
 `python tests/test_paper_broker.py` comprueba spread, comisiones, profundidad, filtros, persistencia, reintentos idempotentes y coincidencia entre PnL y saldo. `python tests/test_paper_registration.py` comprueba el registro sin claves y la validacion del capital. `npm run build` verifica la interfaz. Mantener PAPER al menos 30 dias, con las mismas reglas del bot, sin reajustar parametros al mirar resultados. Evaluar operaciones netas, factor de beneficio, caida maxima, errores de datos, rechazos y deslizamiento observado. El gate REAL permanece cerrado y las compras reales siguen bloqueadas en codigo.
+
+Para ejecutar dos instancias locales a la vez, iniciar este backend en un puerto distinto al del bot existente y configurar el proxy de Vite con `VITE_API_PROXY_TARGET=http://127.0.0.1:PUERTO`. El servicio PAPER solo recoge datos mientras el equipo y los procesos permanecen encendidos. La configuracion guardada usada en la primera prueba local data de julio de 2026 y no representa necesariamente las preferencias actuales.
