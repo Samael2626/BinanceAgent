@@ -141,6 +141,7 @@ def simulate_futures_kronos(
     tp_pct = 2.0
     sl_pct = 1.5
     cooldown_until = -1
+    be_locked = False
 
     trades: list[dict] = []
     curve: list[dict] = []
@@ -164,10 +165,15 @@ def simulate_futures_kronos(
             reason = ""
             atr_now = max(atrs[i], entry_price * 0.005)
             if pos_side == "LONG":
+                # Confirmed closed-bar profit protection: if previous bar closed >= +1.45% above entry, lock +0.60%
+                if not be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0145:
+                    stop_price = max(stop_price, entry_price * 1.0060)
+                    be_locked = True
+
                 tp_p = entry_price * (1.0 + tp_pct / 100.0)
                 if lo <= stop_price:
                     exit_mid = min(opens[i], stop_price)
-                    reason = "TRAIL_LONG" if stop_price > entry_price else "SL_LONG"
+                    reason = "PROFIT_LOCK_LONG" if stop_price >= entry_price * 1.0050 else ("TRAIL_LONG" if stop_price > entry_price else "SL_LONG")
                 elif h >= tp_p:
                     exit_mid, reason = tp_p, "TP_LONG"
                 else:
@@ -177,10 +183,15 @@ def simulate_futures_kronos(
                     if c < ema_50[i] and peak_price >= entry_price * 1.012:
                         exit_mid, reason = c, "EMA50_EXIT_LONG"
             else:
+                # Confirmed closed-bar profit protection: if previous bar closed <= -1.45% below entry, lock +0.60%
+                if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9855:
+                    stop_price = min(stop_price, entry_price * 0.9940)
+                    be_locked = True
+
                 tp_p = entry_price * (1.0 - tp_pct / 100.0)
                 if h >= stop_price:
                     exit_mid = max(opens[i], stop_price)
-                    reason = "TRAIL_SHORT" if stop_price < entry_price else "SL_SHORT"
+                    reason = "PROFIT_LOCK_SHORT" if stop_price <= entry_price * 0.9950 else ("TRAIL_SHORT" if stop_price < entry_price else "SL_SHORT")
                 elif lo <= tp_p:
                     exit_mid, reason = tp_p, "TP_SHORT"
                 else:
@@ -218,6 +229,7 @@ def simulate_futures_kronos(
                 stop_price = 0.0
                 iso_margin = 0.0
                 funding_accrued = 0.0
+                be_locked = False
                 cooldown_until = i + 6
 
         elif i >= cooldown_until and i + 1 < end_idx and not lats[i]:
@@ -317,6 +329,7 @@ def simulate_futures_kronos(
                         entry_time = times[i + 1]
                         tp_pct = 2.0 if pos_side == "LONG" else 1.9
                         sl_pct = 1.5
+                        be_locked = False
 
         unrealized = 0.0
         if pos_qty > 0.0:
@@ -386,9 +399,13 @@ def simulate_random_futures_baseline(
                 peak_p = entry_fill
                 exit_mid = closes[len(closes) - 1]
                 exit_bar = len(closes) - 1
+                rand_locked = False
                 for j in range(idx + 1, len(closes)):
                     atr_now = max(atrs[j], entry_fill * 0.005)
                     if side == "LONG":
+                        if not rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0145:
+                            stop_p = max(stop_p, entry_fill * 1.0060)
+                            rand_locked = True
                         if lows[j] <= stop_p:
                             exit_mid, exit_bar = min(opens[j], stop_p), j
                             break
@@ -401,6 +418,9 @@ def simulate_random_futures_baseline(
                             exit_mid, exit_bar = closes[j], j
                             break
                     else:
+                        if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9855:
+                            stop_p = min(stop_p, entry_fill * 0.9940)
+                            rand_locked = True
                         if highs[j] >= stop_p:
                             exit_mid, exit_bar = max(opens[j], stop_p), j
                             break

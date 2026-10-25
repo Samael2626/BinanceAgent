@@ -273,7 +273,16 @@ class KronosQuantStrategy(BaseStrategy):
         tp_pct, sl_pct = self._resolve_barriers_pct(indicators, settings, entry_price, position_side)
         local_settings = {**settings, "stop_loss_pct": sl_pct, "take_profit_pct": tp_pct}
 
+        highest_price = float(state.get("highest_price", 0.0) or 0.0)
+
         if position_side == "SHORT":
+            # Confirmed profit lock for SHORT (+1.45% gain reached, lock +0.60%)
+            if lowest_price > 0 and lowest_price <= entry_price * 0.9855:
+                lock_p = entry_price * 0.9940
+                if current_price >= lock_p:
+                    self.log_decision(f"EXIT SHORT: Profit Lock @ {current_price:.4f} >= {lock_p:.4f}", print)
+                    return True
+
             # Mirror SHORT Stop Loss, Trailing, and Take Profit
             sl_price = entry_price * (1.0 + sl_pct / 100.0)
             if current_price >= sl_price:
@@ -295,5 +304,12 @@ class KronosQuantStrategy(BaseStrategy):
                 self.log_decision(f"EXIT SHORT: Take Profit @ {current_price:.4f} <= {tp_price:.4f}", print)
                 return True
             return False
+
+        # Confirmed profit lock for LONG (+1.45% gain reached, lock +0.60%)
+        if highest_price > 0 and highest_price >= entry_price * 1.0145:
+            lock_p = entry_price * 1.0060
+            if current_price <= lock_p:
+                self.log_decision(f"EXIT LONG: Profit Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
+                return True
 
         return self.check_standard_exits(indicators, local_settings, state)
