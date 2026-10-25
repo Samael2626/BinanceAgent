@@ -63,7 +63,7 @@ def simulate_futures_kronos(
     cost_model: FuturesCostModel,
     *,
     initial_equity: float = 47.0,
-    notional_per_trade: float = 16.0,
+    notional_per_trade: float = 20.0,
     leverage: int = 2,
     start_idx: int = 250,
     end_idx: int | None = None,
@@ -525,10 +525,10 @@ def main() -> None:
     parser.add_argument(
         "--symbols",
         nargs="+",
-        default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "BNBUSDT"],
+        default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "BNBUSDT"],
     )
     parser.add_argument("--tf", default="1h")
-    parser.add_argument("--notional", type=float, default=16.0)
+    parser.add_argument("--notional", type=float, default=20.0)
     args = parser.parse_args()
 
     print("=" * 100)
