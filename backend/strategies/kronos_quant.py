@@ -312,4 +312,21 @@ class KronosQuantStrategy(BaseStrategy):
                 self.log_decision(f"EXIT LONG: Profit Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
                 return True
 
+        bars_held = int(state.get("bars_held", 0) or 0)
+
+        # Vertical Time Barrier (8 bars momentum stall exit in profit)
+        if bars_held >= 8:
+            if position_side == "SHORT" and current_price <= entry_price * 0.9980:
+                self.log_decision(
+                    f"EXIT SHORT: Vertical Time Barrier ({bars_held} bars) @ {current_price:.4f} <= {entry_price * 0.9980:.4f}",
+                    print,
+                )
+                return True
+            elif position_side == "LONG" and current_price >= entry_price * 1.0020:
+                self.log_decision(
+                    f"EXIT LONG: Vertical Time Barrier ({bars_held} bars) @ {current_price:.4f} >= {entry_price * 1.0020:.4f}",
+                    print,
+                )
+                return True
+
         return self.check_standard_exits(indicators, local_settings, state)

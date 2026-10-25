@@ -897,7 +897,10 @@ class BinanceBot:
         state = {
             "current_price": self.current_price,
             "entry_price": self.entry_price,
-            "highest_price": self.highest_price,
+            "highest_price": getattr(self, "highest_price", 0.0),
+            "lowest_price": getattr(self, "lowest_price", self.entry_price),
+            "position_side": getattr(self, "position_side", "LONG"),
+            "bars_held": getattr(self, "bars_held", 0),
             "accumulated_qty": self.accumulated_qty,
             "position_orders": self.position_orders,
             "symbol": self.symbol,

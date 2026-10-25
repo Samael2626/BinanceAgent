@@ -182,6 +182,8 @@ def simulate_futures_kronos(
                     stop_price = max(stop_price, peak_price - 2.4 * atr_now)
                     if c < ema_50[i] and peak_price >= entry_price * 1.012:
                         exit_mid, reason = c, "EMA50_EXIT_LONG"
+                    elif (i - entry_bar_idx) >= 8 and c >= entry_price * 1.0020:
+                        exit_mid, reason = c, "TIME_EXIT_LONG"
             else:
                 # Confirmed closed-bar profit protection: if previous bar closed <= -1.45% below entry, lock +0.60%
                 if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9855:
@@ -199,6 +201,8 @@ def simulate_futures_kronos(
                     stop_price = min(stop_price, peak_price + 2.4 * atr_now)
                     if c > ema_50[i] and peak_price <= entry_price * 0.988:
                         exit_mid, reason = c, "EMA50_EXIT_SHORT"
+                    elif (i - entry_bar_idx) >= 8 and c <= entry_price * 0.9980:
+                        exit_mid, reason = c, "TIME_EXIT_SHORT"
 
             if reason:
                 close_order_side = "SELL" if pos_side == "LONG" else "BUY"
@@ -417,6 +421,9 @@ def simulate_random_futures_baseline(
                         if closes[j] < ema_50[j] and peak_p >= entry_fill * 1.012:
                             exit_mid, exit_bar = closes[j], j
                             break
+                        elif (j - (idx + 1)) >= 8 and closes[j] >= entry_fill * 1.0020:
+                            exit_mid, exit_bar = closes[j], j
+                            break
                     else:
                         if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9855:
                             stop_p = min(stop_p, entry_fill * 0.9940)
@@ -430,6 +437,9 @@ def simulate_random_futures_baseline(
                         peak_p = min(peak_p, lows[j])
                         stop_p = min(stop_p, peak_p + 2.4 * atr_now)
                         if closes[j] > ema_50[j] and peak_p <= entry_fill * 0.988:
+                            exit_mid, exit_bar = closes[j], j
+                            break
+                        elif (j - (idx + 1)) >= 8 and closes[j] <= entry_fill * 0.9980:
                             exit_mid, exit_bar = closes[j], j
                             break
                 exit_fill = cost_model.fill_price(exit_mid, close_side)
