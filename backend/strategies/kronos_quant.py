@@ -209,6 +209,16 @@ class KronosQuantStrategy(BaseStrategy):
             chosen_side = "NONE"
             chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
 
+        # Anti-Wick quality filter: reject breakout candles with long opposing wicks (absorption)
+        candle_close_pct = float(indicators.get("candle_close_pct", -1.0))
+        if candle_close_pct >= 0.0 and chosen_side != "NONE":
+            if chosen_side == "LONG" and candle_close_pct < 0.60:
+                chosen_side = "NONE"
+                chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
+            elif chosen_side == "SHORT" and candle_close_pct > 0.40:
+                chosen_side = "NONE"
+                chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
+
         # Map net EV (bps) into the 0..100 score scale used by BinanceBot & Scanner
         # At chosen_ev == min_ev_bps -> score = 65.0; +35 bps above threshold -> 100.0
         raw_score = 65.0 + (chosen_ev - min_ev_bps) * 1.0
@@ -225,6 +235,8 @@ class KronosQuantStrategy(BaseStrategy):
         ]
         if btc_trend != "NEUTRAL":
             reasons.append(f"Lead={btc_trend}({btc_bias:+.1f}bps)")
+        if candle_close_pct >= 0.0:
+            reasons.append(f"Wick={candle_close_pct:.2f}")
         return {
             "side": chosen_side,
             "score": score,
@@ -289,15 +301,46 @@ class KronosQuantStrategy(BaseStrategy):
 
         highest_price = float(state.get("highest_price", 0.0) or 0.0)
 
+        bars_held = int(state.get("bars_held", 0) or 0)
+
+        # 1. 3-Bar Momentum Scratch: if trade is held >= 3 bars and floating in profit (>= +0.06%), lock it in
+        if bars_held >= 3:
+            if position_side == "SHORT" and current_price <= entry_price * 0.9994:
+                self.log_decision(
+                    f"EXIT SHORT: 3-Bar Momentum Scratch ({bars_held} bars) @ {current_price:.4f} <= {entry_price * 0.9994:.4f}",
+                    print,
+                )
+                return True
+            elif position_side == "LONG" and current_price >= entry_price * 1.0006:
+                self.log_decision(
+                    f"EXIT LONG: 3-Bar Momentum Scratch ({bars_held} bars) @ {current_price:.4f} >= {entry_price * 1.0006:.4f}",
+                    print,
+                )
+                return True
+
+        # 2. Vertical Time Barrier (8 bars momentum stall exit in profit >= +0.20%)
+        if bars_held >= 8:
+            if position_side == "SHORT" and current_price <= entry_price * 0.9980:
+                self.log_decision(
+                    f"EXIT SHORT: Vertical Time Barrier ({bars_held} bars) @ {current_price:.4f} <= {entry_price * 0.9980:.4f}",
+                    print,
+                )
+                return True
+            elif position_side == "LONG" and current_price >= entry_price * 1.0020:
+                self.log_decision(
+                    f"EXIT LONG: Vertical Time Barrier ({bars_held} bars) @ {current_price:.4f} >= {entry_price * 1.0020:.4f}",
+                    print,
+                )
+                return True
+
+        # 3. SHORT Position Exits (Profit Lock, Stop Loss, Trailing, TP)
         if position_side == "SHORT":
-            # Confirmed profit lock for SHORT (+1.45% gain reached, lock +0.60%)
             if lowest_price > 0 and lowest_price <= entry_price * 0.9855:
                 lock_p = entry_price * 0.9940
                 if current_price >= lock_p:
                     self.log_decision(f"EXIT SHORT: Profit Lock @ {current_price:.4f} >= {lock_p:.4f}", print)
                     return True
 
-            # Mirror SHORT Stop Loss, Trailing, and Take Profit
             sl_price = entry_price * (1.0 + sl_pct / 100.0)
             if current_price >= sl_price:
                 self.log_decision(f"EXIT SHORT: Stop Loss @ {current_price:.4f} >= {sl_price:.4f}", print)
@@ -319,28 +362,11 @@ class KronosQuantStrategy(BaseStrategy):
                 return True
             return False
 
-        # Confirmed profit lock for LONG (+1.45% gain reached, lock +0.60%)
+        # 4. LONG Position Exits (Profit Lock, Standard Exits)
         if highest_price > 0 and highest_price >= entry_price * 1.0145:
             lock_p = entry_price * 1.0060
             if current_price <= lock_p:
                 self.log_decision(f"EXIT LONG: Profit Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
-                return True
-
-        bars_held = int(state.get("bars_held", 0) or 0)
-
-        # Vertical Time Barrier (8 bars momentum stall exit in profit)
-        if bars_held >= 8:
-            if position_side == "SHORT" and current_price <= entry_price * 0.9980:
-                self.log_decision(
-                    f"EXIT SHORT: Vertical Time Barrier ({bars_held} bars) @ {current_price:.4f} <= {entry_price * 0.9980:.4f}",
-                    print,
-                )
-                return True
-            elif position_side == "LONG" and current_price >= entry_price * 1.0020:
-                self.log_decision(
-                    f"EXIT LONG: Vertical Time Barrier ({bars_held} bars) @ {current_price:.4f} >= {entry_price * 1.0020:.4f}",
-                    print,
-                )
                 return True
 
         return self.check_standard_exits(indicators, local_settings, state)

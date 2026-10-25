@@ -43,6 +43,44 @@ def test_adaptive_trailing_exits_when_price_loses_atr_band():
     assert strategy.check_sell_signal(indicators, settings, state) is True
 
 
+def test_kronos_quant_scratch_and_vertical_exits():
+    from strategies.kronos_quant import KronosQuantStrategy
+
+    strategy = KronosQuantStrategy()
+    settings = {"stop_loss_pct": 1.5, "take_profit_pct": 2.0}
+
+    # Case 1: LONG scratch after 3 bars held with slight profit (+0.10%)
+    state_long_scratch = {
+        "position_side": "LONG",
+        "entry_price": 100.0,
+        "current_price": 100.10,
+        "highest_price": 100.20,
+        "bars_held": 3,
+    }
+    assert strategy.check_sell_signal({"atr": 1.0}, settings, state_long_scratch) is True
+
+    # Case 2: SHORT scratch after 3 bars held with slight profit (+0.10%)
+    state_short_scratch = {
+        "position_side": "SHORT",
+        "entry_price": 100.0,
+        "current_price": 99.90,
+        "lowest_price": 99.80,
+        "bars_held": 3,
+    }
+    assert strategy.check_sell_signal({"atr": 1.0}, settings, state_short_scratch) is True
+
+    # Case 3: SHORT position losing money at bar 3 should NOT scratch (it holds or waits for SL/TP)
+    state_short_holding = {
+        "position_side": "SHORT",
+        "entry_price": 100.0,
+        "current_price": 100.20,
+        "lowest_price": 99.95,
+        "bars_held": 3,
+    }
+    assert strategy.check_sell_signal({"atr": 1.0}, settings, state_short_holding) is False
+
+
 if __name__ == "__main__":
     test_adaptive_trailing_exits_when_price_loses_atr_band()
+    test_kronos_quant_scratch_and_vertical_exits()
     print("strategy exit tests ok")

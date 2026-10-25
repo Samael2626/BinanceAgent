@@ -201,6 +201,8 @@ def simulate_futures_kronos(
                         exit_mid, reason = c, "EMA50_EXIT_LONG"
                     elif (i - entry_bar_idx) >= 8 and c >= entry_price * 1.0020:
                         exit_mid, reason = c, "TIME_EXIT_LONG"
+                    elif (i - entry_bar_idx) >= 3 and c >= entry_price * 1.0006:
+                        exit_mid, reason = c, "SCRATCH_LONG"
             else:
                 # Confirmed closed-bar profit protection: if previous bar closed <= -1.45% below entry, lock +0.60%
                 if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9855:
@@ -220,6 +222,8 @@ def simulate_futures_kronos(
                         exit_mid, reason = c, "EMA50_EXIT_SHORT"
                     elif (i - entry_bar_idx) >= 8 and c <= entry_price * 0.9980:
                         exit_mid, reason = c, "TIME_EXIT_SHORT"
+                    elif (i - entry_bar_idx) >= 3 and c <= entry_price * 0.9994:
+                        exit_mid, reason = c, "SCRATCH_SHORT"
 
             if reason:
                 close_order_side = "SELL" if pos_side == "LONG" else "BUY"
@@ -254,8 +258,13 @@ def simulate_futures_kronos(
                 cooldown_until = i + 6
 
         elif i >= cooldown_until and i + 1 < end_idx and not lats[i]:
-            # High-Conviction Asymmetric Pre-Filter
+            # High-Conviction Asymmetric Pre-Filter with Anti-Wick Quality Gate
             rvol = vols[i] / max(vol_sma[i], 1e-12)
+            bar_range = max(highs[i] - lows[i], 1e-6)
+            close_pct_in_bar = (closes[i] - lows[i]) / bar_range
+            bull_candle_ok = close_pct_in_bar >= 0.60
+            bear_candle_ok = close_pct_in_bar <= 0.40
+
             is_long_liq_flush = (z_score_arr[i] <= -2.5) and (rvol >= 2.0) and (rsis[i] <= 28.0)
             is_bull_breakout = (
                 (c > donchian_high_36[i])
@@ -264,6 +273,7 @@ def simulate_futures_kronos(
                 and (c > t_ema[i])
                 and (f_ema[i] > t_ema[i])
                 and (rsis[i] >= 52.0 and rsis[i] <= 66.0)
+                and bull_candle_ok
             )
             is_bear_breakout = (
                 (c < donchian_low_36[i])
@@ -272,6 +282,7 @@ def simulate_futures_kronos(
                 and (c < t_ema[i])
                 and (ema_50[i] < t_ema[i])
                 and (rsis[i] <= 48.0 and rsis[i] >= 28.0)
+                and bear_candle_ok
             )
             is_short_squeeze_flush = (z_score_arr[i] >= 2.8) and (rvol >= 2.2) and (rsis[i] >= 75.0)
 
@@ -306,6 +317,7 @@ def simulate_futures_kronos(
                 "adx": adxs[i],
                 "atr": atrs[i],
                 "is_lateral": bool(lats[i]),
+                "candle_close_pct": close_pct_in_bar,
             }
             # Add microstructure regime bonus for confirmed breakout / flush
             micro_long = 15.0 if (is_long_liq_flush or is_bull_breakout) else -20.0
@@ -456,6 +468,9 @@ def simulate_random_futures_baseline(
                         elif (j - (idx + 1)) >= 8 and closes[j] >= entry_fill * 1.0020:
                             exit_mid, exit_bar = closes[j], j
                             break
+                        elif (j - (idx + 1)) >= 3 and closes[j] >= entry_fill * 1.0006:
+                            exit_mid, exit_bar = closes[j], j
+                            break
                     else:
                         if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9855:
                             stop_p = min(stop_p, entry_fill * 0.9940)
@@ -472,6 +487,9 @@ def simulate_random_futures_baseline(
                             exit_mid, exit_bar = closes[j], j
                             break
                         elif (j - (idx + 1)) >= 8 and closes[j] <= entry_fill * 0.9980:
+                            exit_mid, exit_bar = closes[j], j
+                            break
+                        elif (j - (idx + 1)) >= 3 and closes[j] <= entry_fill * 0.9994:
                             exit_mid, exit_bar = closes[j], j
                             break
                 exit_fill = cost_model.fill_price(exit_mid, close_side)
