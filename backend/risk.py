@@ -61,6 +61,57 @@ def calculate_position_quote_size(
     return floor(quote_size * 100) / 100
 
 
+def calculate_futures_position_size(
+    equity: float,
+    current_price: float,
+    stop_loss_pct: float,
+    atr: float,
+    risk_per_trade_pct: float,
+    atr_stop_mult: float,
+    leverage: int = 2,
+    min_notional: float = 5.0,
+    max_margin_pct: float = 35.0,
+    maint_margin_rate: float = 0.005,
+) -> float:
+    """
+    Calculates safe USDⓈ-M Futures notional size (in USDT) for small accounts (< 50 USDT).
+    Enforces:
+      1. Leverage strictly in 1..3x.
+      2. Liquidation distance >= 3x Stop Loss distance (prevents premature isolated liquidation).
+      3. Isolated margin required (notional / leverage) <= equity * (max_margin_pct / 100).
+      4. Notional >= contract `min_notional` (fails closed returning 0.0 if unreachable).
+    """
+    if equity <= 0 or current_price <= 0:
+        return 0.0
+    if int(leverage) < 1 or int(leverage) > 3:
+        return 0.0
+
+    lev = float(int(leverage))
+    stop_pct = max(float(stop_loss_pct or 0), 0.25)
+    if atr > 0:
+        atr_pct = (atr / current_price) * 100.0
+        stop_pct = max(stop_pct, atr_pct * max(float(atr_stop_mult or 0), 0.1))
+
+    # Isolated liquidation distance (%) ~ (100 / lev) - (maint_margin_rate * 100)
+    approx_liq_dist_pct = (100.0 / lev) - (float(maint_margin_rate) * 100.0)
+    if stop_pct * 3.0 >= approx_liq_dist_pct:
+        return 0.0
+
+    risk_pct = max(float(risk_per_trade_pct or 0), 0.1) / 100.0
+    risk_capital = equity * risk_pct
+    if risk_capital <= 0:
+        return 0.0
+
+    notional_by_risk = risk_capital / max(stop_pct / 100.0, 0.0025)
+    max_margin_usdt = min(equity * 0.95, equity * (max(float(max_margin_pct or 0), 1.0) / 100.0))
+    max_notional_by_margin = max_margin_usdt * lev
+
+    notional = min(notional_by_risk, max_notional_by_margin)
+    if notional < float(min_notional or 5.0):
+        return 0.0
+    return floor(notional * 100) / 100
+
+
 def should_halt_buying(
     *,
     daily_pnl: float,

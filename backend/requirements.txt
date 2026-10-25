@@ -11,3 +11,7 @@ python-telegram-bot
 cryptography
 pytz
 numpy
+torch
+huggingface_hub
+safetensors
+einops

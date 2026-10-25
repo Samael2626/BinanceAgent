@@ -10,6 +10,7 @@ from uuid import uuid4
 from datetime import datetime
 from .binance_wrapper import BinanceWrapper, OrderStatusUnknown
 from .paper_broker import PaperBroker
+from .futures_paper_broker import FuturesPaperBroker
 from .config import API_KEY, API_SECRET, TELEGRAM_BOT_TOKEN, TRADING_MODE
 from .database import DatabaseManager
 from .decision_trace import (
@@ -20,6 +21,7 @@ from .decision_trace import (
 from .telegram_notifier import TelegramNotifier
 from .indicators import calculate_indicators
 from .risk import (
+    calculate_futures_position_size,
     calculate_position_quote_size,
     next_halt_timestamp,
     sanitize_timeframe,
@@ -38,8 +40,11 @@ from .scanner import (
 from .strategies.rsi_rebound import RSIReboundStrategy
 from .strategies.breakout_volume import BreakoutVolumeStrategy
 from .strategies.smart_scalper import SmartScalperStrategy
+from .strategies.kronos_quant import KronosQuantStrategy
 
 from .predictive_modules import PredictiveEngine
+from .services.kronos_adapter import DEFAULT_KRONOS_MODEL, KronosAdapter
+from .services.microstructure import MicrostructureAnalyzer, ForceOrderWindowTracker
 from .services.market_data import MarketDataService, closed_klines
 
 
@@ -118,6 +123,8 @@ class BinanceBot:
             "rsi_rebound": RSIReboundStrategy(),
             "breakout_volume": BreakoutVolumeStrategy(),
             "smart_scalper": SmartScalperStrategy(),
+            "kronos_quant": KronosQuantStrategy(),
+            "kronos": KronosQuantStrategy(),
             "rsi": RSIReboundStrategy(),  # Backward compatibility
             "ema_rsi": RSIReboundStrategy(),  # Backward compatibility fallback
             "multi": SmartScalperStrategy(),  # Backward compatibility fallback
@@ -125,6 +132,23 @@ class BinanceBot:
             "smart_scalping": SmartScalperStrategy(),  # Backward compatibility
             "scalper_pro": SmartScalperStrategy()  # Backward compatibility
         }
+
+        # Kronos & Futures Settings (< 50 USDT guard)
+        self.market_type = str(self.db.get_setting("market_type", "SPOT", user_id=user_id) or "SPOT").upper()
+        self.futures_leverage = min(3, max(1, int(self.db.get_setting("futures_leverage", 2, user_id=user_id) or 2)))
+        self.futures_allow_short = self.db.get_setting("futures_allow_short", "True", user_id=user_id) == "True"
+        self.order_execution_style = str(self.db.get_setting("order_execution_style", "LIMIT_MAKER", user_id=user_id) or "LIMIT_MAKER").upper()
+        self.kronos_model_id = str(self.db.get_setting("kronos_model_id", DEFAULT_KRONOS_MODEL, user_id=user_id) or DEFAULT_KRONOS_MODEL)
+        self.kronos_horizon_bars = int(self.db.get_setting("kronos_horizon_bars", 12, user_id=user_id) or 12)
+        self.kronos_sample_count = int(self.db.get_setting("kronos_sample_count", 20, user_id=user_id) or 20)
+        self.kronos_min_ev_bps = float(self.db.get_setting("kronos_min_ev_bps", 12.0, user_id=user_id) or 12.0)
+        self.kronos_min_rr_ratio = float(self.db.get_setting("kronos_min_rr_ratio", 1.8, user_id=user_id) or 1.8)
+        self.kronos_adapter = KronosAdapter(model_id=self.kronos_model_id)
+        self.microstructure_analyzer = MicrostructureAnalyzer()
+        self.force_order_tracker = ForceOrderWindowTracker(maxlen=2000, default_window_sec=300)
+        self.kronos_forecast: dict = {}
+        self.microstructure: dict = {}
+        self.futures_paper_broker: FuturesPaperBroker | None = None
 
         # Operational Settings
         self.notify_signals = self.db.get_setting(
@@ -355,16 +379,23 @@ class BinanceBot:
         """Initializes the Binance client and starts background services."""
         try:
             self._log("Validating credentials...", "DEBUG")
-            if self.db.get_setting("execution_mode", "", user_id=self.user_id) == "PAPER":
-                self.client = PaperBroker(self.db, self.user_id)
+            exec_mode = self.db.get_setting("execution_mode", "", user_id=self.user_id)
+            if exec_mode in {"PAPER", "PAPER_FUTURES"}:
+                if exec_mode == "PAPER_FUTURES" or self.market_type == "FUTURES":
+                    self.market_type = "FUTURES"
+                    self.futures_paper_broker = FuturesPaperBroker(self.db, self.user_id)
+                    self.client = self.futures_paper_broker
+                    self.testnet_commission_pct = float(self.futures_paper_broker.taker_fee_pct)
+                else:
+                    self.client = PaperBroker(self.db, self.user_id)
+                    self.testnet_commission_pct = float(self.client.fee_pct)
                 self.data_client = self.client
                 self.is_testnet = True
                 self.is_paper = True
-                self.testnet_commission_pct = float(self.client.fee_pct)
                 self.market_data_service = MarketDataService(self.data_client)
                 self._update_account_balances()
                 threading.Thread(target=self._finish_initialization, daemon=True).start()
-                self._log("PAPER conectado a datos publicos Spot", "INFO")
+                self._log(f"PAPER conectado a datos publicos ({self.market_type})", "INFO")
                 return True
 
             # CRITICAL: Sanitize credentials to prevent APIError -1100 (illegal characters)
@@ -546,10 +577,46 @@ class BinanceBot:
                 for key, val in indicators.items():
                     setattr(self, key, val)
 
-                # Run Predictive Analysis
+                # Run Predictive Analysis + Kronos Forecast
                 if self.current_price > 0:
                     self.prediction = self.predictive_engine.analyze(
                         df, self.current_price)
+                    try:
+                        kf = self.kronos_adapter.forecast(
+                            df,
+                            symbol=self.symbol,
+                            timeframe=self.timeframe,
+                            horizon_bars=self.kronos_horizon_bars,
+                            sample_count=self.kronos_sample_count,
+                            tp_pct=self.take_profit_pct,
+                            sl_pct=self.stop_loss_pct,
+                        )
+                        self.kronos_forecast = kf.to_dict()
+                        self.prediction["kronos_forecast"] = self.kronos_forecast
+                    except Exception as k_exc:
+                        self._log(f"Kronos forecast warning: {k_exc}", "DEBUG")
+
+                    # Microstructure analysis (OBI, OI regime, Funding, Force orders)
+                    try:
+                        fc_stats = self.force_order_tracker.get_window_stats(self.symbol, window_sec=300)
+                        book = getattr(self.client, "get_futures_order_book", lambda **kw: None)(symbol=self.symbol, limit=10) if self.market_type == "FUTURES" else None
+                        mp_info = getattr(self.client, "get_futures_mark_price_and_funding", lambda s: {})(self.symbol) if self.market_type == "FUTURES" else {}
+                        fr = float(mp_info.get("lastFundingRate", 0.0) or 0.0)
+                        mark_p = float(mp_info.get("markPrice", self.current_price) or self.current_price)
+                        idx_p = float(mp_info.get("indexPrice", self.current_price) or self.current_price)
+                        ms = self.microstructure_analyzer.analyze(
+                            self.symbol,
+                            book=book,
+                            funding_rate=fr,
+                            mark_price=mark_p,
+                            index_price=idx_p,
+                            long_forced_close_usdt=fc_stats.get("long_forced_close_usdt", 0.0),
+                            short_forced_close_usdt=fc_stats.get("short_forced_close_usdt", 0.0),
+                        )
+                        self.microstructure = ms.to_dict()
+                        self.prediction["microstructure"] = self.microstructure
+                    except Exception as m_exc:
+                        self._log(f"Microstructure warning: {m_exc}", "DEBUG")
 
                 # Construct history with all necessary fields for the Pro Chart
                 history_data = []
@@ -833,7 +900,9 @@ class BinanceBot:
             "highest_price": self.highest_price,
             "accumulated_qty": self.accumulated_qty,
             "position_orders": self.position_orders,
-            "symbol": self.symbol
+            "symbol": self.symbol,
+            "kronos_forecast": self.kronos_forecast,
+            "microstructure": self.microstructure,
         }
 
         # 2. Check Signals
@@ -1183,9 +1252,15 @@ class BinanceBot:
             self.pending_order = pending
 
             try:
-                trade = self.client.place_order(
-                    symbol, side, quantity, quote_order_qty=quote_order_qty,
-                    client_order_id=client_order_id)
+                # Use smart Post-Only GTX maker execution for Futures paper when configured
+                if getattr(self, "market_type", "SPOT") == "FUTURES" and self.order_execution_style == "LIMIT_MAKER" and hasattr(self.client, "place_smart_maker_order"):
+                    trade = self.client.place_smart_maker_order(
+                        symbol, side, quantity, quote_order_qty=quote_order_qty,
+                        client_order_id=client_order_id)
+                else:
+                    trade = self.client.place_order(
+                        symbol, side, quantity, quote_order_qty=quote_order_qty,
+                        client_order_id=client_order_id)
                 if not trade:
                     raise OrderStatusUnknown(symbol, client_order_id)
 
@@ -1455,6 +1530,20 @@ class BinanceBot:
 
         equity = self._baseline_equity()
         atr = float(getattr(self, "atr", 0.0) or 0.0)
+        if getattr(self, "market_type", "SPOT") == "FUTURES":
+            notional_qty = calculate_futures_position_size(
+                equity=equity,
+                current_price=self.current_price,
+                stop_loss_pct=self.stop_loss_pct,
+                atr=atr,
+                risk_per_trade_pct=self.risk_per_trade_pct,
+                atr_stop_mult=self.atr_stop_mult,
+                leverage=int(getattr(self, "futures_leverage", 2) or 2),
+                min_notional=5.0,
+                max_margin_pct=35.0,
+            )
+            return notional_qty
+
         quote_qty = calculate_position_quote_size(
             equity=equity,
             current_price=self.current_price,
@@ -1570,6 +1659,19 @@ class BinanceBot:
                 indicators = calculate_indicators(df, settings)
                 current_price = float(df["close"].iloc[-1])
                 prediction = self.predictive_engine.analyze(df, current_price)
+                try:
+                    kf = self.kronos_adapter.forecast(
+                        df,
+                        symbol=symbol,
+                        timeframe=self.timeframe,
+                        horizon_bars=self.kronos_horizon_bars,
+                        sample_count=self.kronos_sample_count,
+                        tp_pct=self.take_profit_pct,
+                        sl_pct=self.stop_loss_pct,
+                    )
+                    prediction["kronos_forecast"] = kf.to_dict()
+                except Exception:
+                    pass
                 candidate_score = score_rotation_candidate(prediction, indicators)
                 decision = build_scanner_decision(
                     symbol,
@@ -1929,7 +2031,7 @@ class BinanceBot:
             net_pnl = sum([t.get('pnl', 0) for t in self.trades])
 
             return {
-                "is_running": self.is_running, "symbol": self.symbol, "mode": "PAPER" if self.is_paper else "TESTNET" if self.is_testnet else "REAL",
+                "is_running": self.is_running, "symbol": self.symbol, "mode": ("PAPER_FUTURES" if self.market_type == "FUTURES" else "PAPER") if self.is_paper else "TESTNET" if self.is_testnet else "REAL",
                 "price": round(self.current_price, 2), "balance": round(self.balance, 2), "crypto_balance": round(self.crypto_balance, 6),
                 "entry_price": round(self.entry_price, 6), "accumulated_qty": round(self.accumulated_qty, 8),
                 "pnl": round(self.pnl, 2), "daily_pnl": round(self.daily_pnl, 2), "rsi": round(self.rsi, 2), "ema_200": round(self.trend_ema, 2),
@@ -1970,6 +2072,15 @@ class BinanceBot:
             "ema_length": self.ema_length, "macd_signal": self.macd_signal_period,
             "rsi_trailing_pct": self.rsi_trailing_pct,
             "smart_scalper_entry_score": self.smart_scalper_entry_score,
+            "market_type": self.market_type,
+            "futures_leverage": self.futures_leverage,
+            "futures_allow_short": self.futures_allow_short,
+            "order_execution_style": self.order_execution_style,
+            "kronos_model_id": self.kronos_model_id,
+            "kronos_horizon_bars": self.kronos_horizon_bars,
+            "kronos_sample_count": self.kronos_sample_count,
+            "kronos_min_ev_bps": self.kronos_min_ev_bps,
+            "kronos_min_rr_ratio": self.kronos_min_rr_ratio,
         }
 
     def update_settings(self, settings: dict):

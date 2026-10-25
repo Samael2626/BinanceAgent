@@ -27,6 +27,9 @@ class RotationCandidate:
     trend_strength: float
     rsi: float
     is_lateral: bool
+    kronos_rank: float = 50.0
+    ev_bps: float = 0.0
+    recommended_side: str = "LONG"
 
 
 def build_scanner_decision(
@@ -41,6 +44,8 @@ def build_scanner_decision(
     min_market_score: float = 28.0,
     spread_bps: float | None = None,
     max_spread_bps: float | None = None,
+    min_notional: float | None = None,
+    max_affordable_notional: float | None = None,
 ) -> dict:
     """Build a diagnostic record without changing scanner selection rules."""
     prediction = prediction or {}
@@ -64,6 +69,12 @@ def build_scanner_decision(
         reasons.append("low_volume")
     if max_spread_bps is not None and spread_bps is not None and spread_bps > max_spread_bps:
         reasons.append("spread_too_wide")
+    if (
+        min_notional is not None
+        and max_affordable_notional is not None
+        and min_notional > max_affordable_notional
+    ):
+        reasons.append("min_notional_exceeds_budget")
     if market_score < min_market_score:
         reasons.append("low_market_score")
     if trend_strength < 35:
@@ -71,8 +82,17 @@ def build_scanner_decision(
     if bool(indicators.get("is_lateral", False)):
         reasons.append("lateral_market")
 
-    allowed = candidate_score is not None and candidate_score >= min_candidate_score
-    reason = "candidate_ok" if allowed else "below_rotation_score"
+    notional_ok = not (
+        min_notional is not None
+        and max_affordable_notional is not None
+        and min_notional > max_affordable_notional
+    )
+    allowed = (
+        notional_ok
+        and candidate_score is not None
+        and candidate_score >= min_candidate_score
+    )
+    reason = "candidate_ok" if allowed else ("min_notional_exceeds_budget" if not notional_ok else "below_rotation_score")
     if candidate_score is None:
         reason = reasons[0] if reasons else "not_scored"
 
@@ -89,6 +109,8 @@ def build_scanner_decision(
         "rvol": rvol,
         "candles": candle_count,
         "spread_bps": spread_bps,
+        "min_notional": min_notional,
+        "max_affordable_notional": max_affordable_notional,
     }
 
 
@@ -141,6 +163,15 @@ def score_rotation_candidate(prediction: dict, indicators: dict) -> float:
         score -= 8.0
     elif rsi <= 28:
         score += 3.0
+
+    kronos = prediction.get("kronos_forecast") or {}
+    if kronos:
+        kronos_rank = float(kronos.get("rank_score", 50.0) or 50.0)
+        # Blend classical score (65%) with Kronos cross-sectional RankIC score (35%)
+        score = (score * 0.65) + (kronos_rank * 0.35)
+    if "ev_bps" in prediction and prediction.get("ev_bps") is not None:
+        ev_bps = float(prediction.get("ev_bps", 0.0) or 0.0)
+        score += max(-15.0, min(15.0, ev_bps * 0.4))
 
     return round(max(0.0, min(100.0, score)), 2)
 
