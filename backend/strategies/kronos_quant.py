@@ -346,10 +346,17 @@ class KronosQuantStrategy(BaseStrategy):
 
         # 3. SHORT Position Exits (Profit Lock, Stop Loss, Trailing, TP)
         if position_side == "SHORT":
+            # Tier-2 High Profit Lock: if reached +1.45% gain, lock +0.60%
             if lowest_price > 0 and lowest_price <= entry_price * 0.9855:
                 lock_p = entry_price * 0.9940
                 if current_price >= lock_p:
                     self.log_decision(f"EXIT SHORT: Profit Lock @ {current_price:.4f} >= {lock_p:.4f}", print)
+                    return True
+            # Tier-1 Breakeven Lock: if reached +1.10% gain, lock +0.20% (cover fees)
+            elif lowest_price > 0 and lowest_price <= entry_price * 0.9890:
+                lock_p = entry_price * 0.9980
+                if current_price >= lock_p:
+                    self.log_decision(f"EXIT SHORT: Tier-1 Breakeven Lock @ {current_price:.4f} >= {lock_p:.4f}", print)
                     return True
 
             sl_price = entry_price * (1.0 + sl_pct / 100.0)
@@ -374,10 +381,18 @@ class KronosQuantStrategy(BaseStrategy):
             return False
 
         # 4. LONG Position Exits (Profit Lock, Standard Exits)
-        if highest_price > 0 and highest_price >= entry_price * 1.0145:
-            lock_p = entry_price * 1.0060
-            if current_price <= lock_p:
-                self.log_decision(f"EXIT LONG: Profit Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
-                return True
+        if highest_price > 0:
+            # Tier-2 High Profit Lock: if reached +1.45% gain, lock +0.60%
+            if highest_price >= entry_price * 1.0145:
+                lock_p = entry_price * 1.0060
+                if current_price <= lock_p:
+                    self.log_decision(f"EXIT LONG: Profit Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
+                    return True
+            # Tier-1 Breakeven Lock: if reached +1.10% gain, lock +0.20% (cover fees)
+            elif highest_price >= entry_price * 1.0110:
+                lock_p = entry_price * 1.0020
+                if current_price <= lock_p:
+                    self.log_decision(f"EXIT LONG: Tier-1 Breakeven Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
+                    return True
 
         return self.check_standard_exits(indicators, local_settings, state)

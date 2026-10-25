@@ -63,7 +63,7 @@ def simulate_futures_kronos(
     cost_model: FuturesCostModel,
     *,
     initial_equity: float = 47.0,
-    notional_per_trade: float = 12.0,
+    notional_per_trade: float = 16.0,
     leverage: int = 2,
     start_idx: int = 250,
     end_idx: int | None = None,
@@ -182,10 +182,12 @@ def simulate_futures_kronos(
             reason = ""
             atr_now = max(atrs[i], entry_price * 0.005)
             if pos_side == "LONG":
-                # Confirmed closed-bar profit protection: if previous bar closed >= +1.45% above entry, lock +0.60%
-                if not be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0145:
-                    stop_price = max(stop_price, entry_price * 1.0060)
+                # Confirmed closed-bar profit protection:
+                if not be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0110:
+                    stop_price = max(stop_price, entry_price * 1.0020)
                     be_locked = True
+                elif be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0145:
+                    stop_price = max(stop_price, entry_price * 1.0060)
 
                 tp_p = entry_price * (1.0 + tp_pct / 100.0)
                 if lo <= stop_price:
@@ -204,10 +206,12 @@ def simulate_futures_kronos(
                     elif (i - entry_bar_idx) >= 3 and c >= entry_price * 1.0006:
                         exit_mid, reason = c, "SCRATCH_LONG"
             else:
-                # Confirmed closed-bar profit protection: if previous bar closed <= -1.45% below entry, lock +0.60%
-                if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9855:
-                    stop_price = min(stop_price, entry_price * 0.9940)
+                # Confirmed closed-bar profit protection:
+                if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9890:
+                    stop_price = min(stop_price, entry_price * 0.9980)
                     be_locked = True
+                elif be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9855:
+                    stop_price = min(stop_price, entry_price * 0.9940)
 
                 tp_p = entry_price * (1.0 - tp_pct / 100.0)
                 if h >= stop_price:
@@ -458,9 +462,11 @@ def simulate_random_futures_baseline(
                 for j in range(idx + 1, len(closes)):
                     atr_now = max(atrs[j], entry_fill * 0.005)
                     if side == "LONG":
-                        if not rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0145:
-                            stop_p = max(stop_p, entry_fill * 1.0060)
+                        if not rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0110:
+                            stop_p = max(stop_p, entry_fill * 1.0020)
                             rand_locked = True
+                        elif rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0145:
+                            stop_p = max(stop_p, entry_fill * 1.0060)
                         if lows[j] <= stop_p:
                             exit_mid, exit_bar = min(opens[j], stop_p), j
                             break
@@ -479,9 +485,11 @@ def simulate_random_futures_baseline(
                             exit_mid, exit_bar = closes[j], j
                             break
                     else:
-                        if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9855:
-                            stop_p = min(stop_p, entry_fill * 0.9940)
+                        if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9890:
+                            stop_p = min(stop_p, entry_fill * 0.9980)
                             rand_locked = True
+                        elif rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9855:
+                            stop_p = min(stop_p, entry_fill * 0.9940)
                         if highs[j] >= stop_p:
                             exit_mid, exit_bar = max(opens[j], stop_p), j
                             break
@@ -517,13 +525,14 @@ def main() -> None:
     parser.add_argument(
         "--symbols",
         nargs="+",
-        default=["ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "BNBUSDT"],
+        default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "BNBUSDT"],
     )
     parser.add_argument("--tf", default="1h")
+    parser.add_argument("--notional", type=float, default=16.0)
     args = parser.parse_args()
 
     print("=" * 100)
-    print(f"KRONOS QUANT FUTURES HARNESS | TF={args.tf} | Equity=47 USDT | Leverage=2x | MinNotional=5 USDT")
+    print(f"KRONOS QUANT FUTURES HARNESS | TF={args.tf} | Equity=47 USDT | Leverage=2x | Notional={args.notional:.1f} USDT")
     print("=" * 100)
 
     d_btc = None
@@ -549,7 +558,13 @@ def main() -> None:
             oos_start, oos_end = bounds["OOS"]
             frames_oos.append((d, oos_start, oos_end))
             tr, cv = simulate_futures_kronos(
-                d, sym, cm, start_idx=oos_start, end_idx=oos_end, d_btc=d_btc
+                d,
+                sym,
+                cm,
+                notional_per_trade=args.notional,
+                start_idx=oos_start,
+                end_idx=oos_end,
+                d_btc=d_btc,
             )
             all_trades.extend(tr)
             if cv:

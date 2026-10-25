@@ -75,7 +75,7 @@ class BinanceBot:
         self.min_balance_threshold = float(
             self.db.get_setting("min_balance", 0.0, user_id=user_id))
         self.trade_qty = float(self.db.get_setting(
-            "trade_qty", 12.0, user_id=user_id))  # Default aligned to real calibration (12 USDT)
+            "trade_qty", 16.0, user_id=user_id))  # Scaled to $16 notional (~17% margin on $47 account)
         self.buy_rsi = float(self.db.get_setting(
             "buy_rsi", 21.0, user_id=user_id))  # Default updated to 21
         self.sell_rsi = float(self.db.get_setting(
