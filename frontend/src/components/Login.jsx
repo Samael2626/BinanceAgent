@@ -8,6 +8,7 @@ const Login = ({ onLoginSuccess }) => {
   const [executionMode, setExecutionMode] = useState('PAPER');
   const [paperInitialUsdt, setPaperInitialUsdt] = useState('47');
   const isTestnet = executionMode !== 'REAL';
+  const isPaper = executionMode === 'PAPER' || executionMode === 'PAPER_FUTURES';
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -18,10 +19,10 @@ const Login = ({ onLoginSuccess }) => {
 
     const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
     const payload = mode === 'register' 
-      ? { username, api_key: executionMode === 'PAPER' ? '' : apiKey,
-          api_secret: executionMode === 'PAPER' ? '' : apiSecret,
+      ? { username, api_key: isPaper ? '' : apiKey,
+          api_secret: isPaper ? '' : apiSecret,
           is_testnet: isTestnet, execution_mode: executionMode,
-          paper_initial_usdt: executionMode === 'PAPER' ? paperInitialUsdt : undefined }
+          paper_initial_usdt: isPaper ? paperInitialUsdt : undefined }
       : { username };
 
     try {
@@ -66,7 +67,7 @@ const Login = ({ onLoginSuccess }) => {
             border: `1px solid ${isTestnet ? '#4caf50' : '#f44336'}`
           }}>
             <p style={{ color: isTestnet ? '#4caf50' : '#f44336', textAlign: 'center', margin: 0, fontWeight: 'bold' }}>
-              {executionMode === 'PAPER' ? 'PAPER: mercado real, saldo virtual' : isTestnet ? 'MODO TESTNET (SIMULACIÓN)' : '⚠️ CUIDADO: MODO CUENTA REAL ⚠️'}
+              {executionMode === 'PAPER_FUTURES' ? 'PAPER Futuros: mercado real, saldo virtual' : executionMode === 'PAPER' ? 'PAPER Spot: mercado real, saldo virtual' : isTestnet ? 'MODO TESTNET (SIMULACIÓN)' : '⚠️ CUIDADO: MODO CUENTA REAL ⚠️'}
             </p>
           </div>
         )}
@@ -94,13 +95,14 @@ const Login = ({ onLoginSuccess }) => {
                   onChange={(e) => setExecutionMode(e.target.value)}
                   style={{ width: '100%', cursor: 'pointer' }}
                 >
-                  <option value="PAPER">PAPER (mercado real, saldo virtual)</option>
+                  <option value="PAPER">PAPER Spot (saldo virtual)</option>
+                  <option value="PAPER_FUTURES">PAPER Futuros (saldo virtual)</option>
                   <option value="TESTNET">Binance Testnet</option>
                   <option value="REAL">Binance Real (dinero real)</option>
                 </select>
               </div>
 
-              {executionMode === 'PAPER' && <div className="form-group" style={{ marginTop: '20px' }}>
+              {isPaper && <div className="form-group" style={{ marginTop: '20px' }}>
                 <label>Capital virtual inicial (USDT)</label>
                 <input
                   type="number"
@@ -115,7 +117,7 @@ const Login = ({ onLoginSuccess }) => {
                 <small>Es dinero simulado; no refleja tu saldo de Binance.</small>
               </div>}
 
-              {executionMode !== 'PAPER' && <>
+              {!isPaper && <>
               <div className="form-group" style={{ marginTop: '20px' }}>
                 <label>API Key de Binance</label>
                 <input
@@ -174,7 +176,7 @@ const Login = ({ onLoginSuccess }) => {
             disabled={loading}
           >
             {loading ? 'Procesando...' : mode === 'register' 
-              ? (executionMode === 'PAPER' ? 'Crear cuenta PAPER' : isTestnet ? 'Registrar en Testnet' : 'REGISTRAR EN CUENTA REAL')
+              ? (isPaper ? `Crear cuenta ${executionMode === 'PAPER_FUTURES' ? 'PAPER Futuros' : 'PAPER Spot'}` : isTestnet ? 'Registrar en Testnet' : 'REGISTRAR EN CUENTA REAL')
               : 'Iniciar Sesión'}
           </button>
         </form>

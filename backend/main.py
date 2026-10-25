@@ -12,11 +12,13 @@ from .bot_manager import BotManager
 from .database import DatabaseManager
 from .services.telegram_manager import TelegramManager
 from .config import TELEGRAM_BOT_TOKEN
+from .services.multi_market_snapshot import MultiMarketSnapshot
 from contextlib import asynccontextmanager
 
 # Initialize Bot Manager and Database
 bot_manager = BotManager()
 db = DatabaseManager()
+multi_market_snapshot = MultiMarketSnapshot()
 
 # Initialize Telegram Manager
 tg_manager = None
@@ -83,6 +85,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health():
+    return {"status": "running", "backend": "up", "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+
+
 # ========== AUTHENTICATION MIDDLEWARE ==========
 
 async def get_current_user(request: Request):
@@ -114,11 +121,11 @@ def register(credentials: dict = Body(...)):
     api_secret = credentials.get("api_secret") or ""
     is_testnet = credentials.get("is_testnet", True)
     execution_mode = credentials.get("execution_mode") or ("TESTNET" if is_testnet else "REAL")
-    if execution_mode not in {"PAPER", "TESTNET", "REAL"}:
+    if execution_mode not in {"PAPER", "PAPER_FUTURES", "TESTNET", "REAL"}:
         raise HTTPException(status_code=400, detail="Modo de ejecucion invalido")
     is_testnet = execution_mode != "REAL"
     paper_initial = None
-    if execution_mode == "PAPER":
+    if execution_mode in {"PAPER", "PAPER_FUTURES"}:
         try:
             paper_initial = Decimal(str(credentials.get("paper_initial_usdt", "47")))
         except InvalidOperation:
@@ -126,7 +133,7 @@ def register(credentials: dict = Body(...)):
         if not paper_initial.is_finite() or not 0 < paper_initial <= 1_000_000:
             raise HTTPException(status_code=400, detail="Capital PAPER fuera de rango")
 
-    if not username or (execution_mode != "PAPER" and not all([api_key, api_secret])):
+    if not username or (execution_mode not in {"PAPER", "PAPER_FUTURES"} and not all([api_key, api_secret])):
         raise HTTPException(
             status_code=400,
             detail="Faltan datos: username, api_key y api_secret son requeridos"
@@ -152,7 +159,7 @@ def register(credentials: dict = Body(...)):
         session_token = secrets.token_urlsafe(32)
         db.set_user_session(user_id, session_token)
 
-        mode = "PAPER (saldo virtual)" if execution_mode == "PAPER" else "Testnet (Simulación)" if is_testnet else "⚠️ CUENTA REAL"
+        mode = "PAPER Futuros (saldo virtual)" if execution_mode == "PAPER_FUTURES" else "PAPER (saldo virtual)" if execution_mode == "PAPER" else "Testnet (Simulación)" if is_testnet else "⚠️ CUENTA REAL"
 
         return {
             "status": "success",
@@ -198,7 +205,7 @@ def login(credentials: dict = Body(...)):
         db.set_user_session(user['id'], session_token)
 
         execution_mode = db.get_setting("execution_mode", "TESTNET" if user['is_testnet'] else "REAL", user_id=user['id'])
-        mode = "PAPER (saldo virtual)" if execution_mode == "PAPER" else "Testnet (Simulación)" if user['is_testnet'] else "⚠️ CUENTA REAL"
+        mode = "PAPER Futuros (saldo virtual)" if execution_mode == "PAPER_FUTURES" else "PAPER (saldo virtual)" if execution_mode == "PAPER" else "Testnet (Simulación)" if user['is_testnet'] else "⚠️ CUENTA REAL"
 
         return {
             "status": "success",
@@ -266,6 +273,33 @@ def get_paper_report(user: dict = Depends(get_current_user)):
     if not bot or not bot.is_paper:
         raise HTTPException(status_code=404, detail="Cuenta PAPER no disponible")
     return bot.client.report()
+
+
+@app.get("/api/paper/futures/report")
+def get_paper_futures_report(user: dict = Depends(get_current_user)):
+    bot = bot_manager.get_bot(user['id'])
+    if not bot or not bot.is_paper or db.get_setting("execution_mode", "", user_id=user['id']) != "PAPER_FUTURES":
+        raise HTTPException(status_code=404, detail="Cuenta PAPER Futures no disponible")
+    broker = getattr(bot, "futures_paper_broker", None)
+    if broker is None and getattr(bot.client, "is_futures", False):
+        broker = bot.client
+    if broker is None:
+        raise HTTPException(status_code=404, detail="Cuenta PAPER Futures no inicializada")
+    position = broker.get_position()
+    mark_price = None
+    if position:
+        try:
+            mark_data = broker.get_futures_mark_price_and_funding(position["symbol"])
+            mark_price = mark_data.get("markPrice")
+        except Exception:
+            mark_price = None
+    return broker.report(current_mark_price=mark_price)
+
+
+@app.get("/api/markets/multi-scan")
+def get_multi_market_scan(user: dict = Depends(get_current_user)):
+    return multi_market_snapshot.get()
+
 
 
 @app.get("/api/tickers")

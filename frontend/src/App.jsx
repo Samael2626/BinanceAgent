@@ -13,6 +13,7 @@ import PredictiveDashboard from './components/PredictiveDashboard'
 import NoviceProSwitch from './components/common/NoviceProSwitch'
 import ChartHelp from './components/common/ChartHelp'
 import LiveMarket from './components/LiveMarket'
+import KronosMultiMarketPanel from './components/KronosMultiMarketPanel'
 
 
 
@@ -602,9 +603,9 @@ function App() {
       {/* New Top Status Bar */}
       <StatusCard botStatus={botStatus} formatMoney={formatMoney} />
 
-      {botStatus.mode === 'PAPER' && (
+      {(currentUser?.execution_mode === 'PAPER' || currentUser?.execution_mode === 'PAPER_FUTURES') && (
         <div className="live-warning-banner" style={{ background: 'rgba(76, 175, 80, 0.12)', color: '#4caf50' }}>
-          PAPER · Saldo virtual. Precios de Binance Spot; ninguna orden se envía al mercado.
+          {currentUser?.execution_mode === 'PAPER_FUTURES' ? 'PAPER Futuros · Saldo virtual. Precios de Binance Futuros; ninguna orden se envía al mercado.' : 'PAPER Spot · Saldo virtual. Precios de Binance Spot; ninguna orden se envía al mercado.'}
         </div>
       )}
 
@@ -614,7 +615,9 @@ function App() {
         </div>
       )}
 
-      <ActionCards 
+      {currentUser?.execution_mode === 'PAPER_FUTURES' && <KronosMultiMarketPanel token={localStorage.getItem('authToken')} />}
+
+      {currentUser?.execution_mode !== 'PAPER_FUTURES' && <ActionCards 
         botStatus={botStatus}
         handleStart={handleStart}
         handleStop={handleStop}
@@ -623,7 +626,7 @@ function App() {
         handleResetPosition={handleResetPosition}
         handleResetPnL={handleResetPnL}
         updateSettings={updateSettings}
-      />
+      />}
 
       <RSIMonitorPanel />
       

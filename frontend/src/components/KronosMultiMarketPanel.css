@@ -1,0 +1,14 @@
+.kronos-panel { background: #171b24; color: #f3f4f6; border: 1px solid #343b49; border-radius: 12px; padding: 20px; margin: 14px 0; }
+.kronos-panel header { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.kronos-panel h2, .kronos-panel h3 { color: #f0b90b; margin: 0 0 12px; }
+.kronos-panel h3 { margin-top: 22px; }
+.kronos-panel small, .kronos-panel span { color: #b7becb; }
+.kronos-grid, .kronos-funding { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.kronos-panel article { border: 1px solid #343b49; border-radius: 8px; padding: 12px; min-width: 0; overflow-wrap: anywhere; }
+.kronos-panel article > * { display: block; margin-bottom: 5px; }
+.kronos-panel article strong { font-size: 1.05rem; }
+.kronos-panel [role=alert], .kronos-panel em { color: #f0b90b; }
+.kronos-light { display: inline-block !important; width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; }
+.kronos-light.green { background: #35c879; } .kronos-light.yellow { background: #f0b90b; } .kronos-light.gray { background: #8a929e; }
+.kronos-poly article { margin-bottom: 8px; }
+@media (max-width: 600px) { .kronos-panel { padding: 14px; } .kronos-grid, .kronos-funding { grid-template-columns: 1fr; } }
