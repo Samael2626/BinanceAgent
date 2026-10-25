@@ -2,6 +2,9 @@
 Binance Trading Bot - Module: bot_logic.py
 Version: 1.9.0 Stable (c) 2026
 """
+import os
+import logging
+from logging.handlers import RotatingFileHandler
 import pandas as pd
 import pandas_ta as ta
 import time
@@ -44,8 +47,18 @@ from .strategies.kronos_quant import KronosQuantStrategy
 
 from .predictive_modules import PredictiveEngine
 from .services.kronos_adapter import DEFAULT_KRONOS_MODEL, KronosAdapter
-from .services.microstructure import MicrostructureAnalyzer, ForceOrderWindowTracker
+from .services.microstructure import MicrostructureAnalyzer, ForceOrderWindowTracker, LeadLagAnalyzer
 from .services.market_data import MarketDataService, closed_klines
+
+os.makedirs("backend/logs", exist_ok=True)
+_file_handler = RotatingFileHandler(
+    "backend/logs/bot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+)
+_file_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+_bot_logger = logging.getLogger("binance_bot")
+_bot_logger.setLevel(logging.INFO)
+if not _bot_logger.handlers:
+    _bot_logger.addHandler(_file_handler)
 
 
 class BinanceBot:
@@ -70,6 +83,13 @@ class BinanceBot:
         self.current_price = 0.0
         self.balance = 0.0
         self.crypto_balance = 0.0
+        self.rvol = 1.0
+        self.candle_close_pct = 0.5
+        self.macro_lead = 0.0
+        self.lead_lag_analyzer = LeadLagAnalyzer("BTCUSDT")
+        self.bars_held = 0
+        self.lowest_price = 0.0
+        self.position_side = "LONG"
 
         # Strategy Settings
         self.min_balance_threshold = float(
@@ -310,11 +330,10 @@ class BinanceBot:
         self.data_client = None
         self.market_data_service = None
 
-        # Restore credentials
-        creds = self.db.get_state("credentials", is_json=True, user_id=user_id)
-        if creds:
-            self._init_client(creds.get("api_key"), creds.get(
-                "api_secret"), creds.get("is_testnet", True))
+        # Restore credentials from encrypted database
+        user = self.db.get_user_by_id(user_id) if hasattr(self.db, "get_user_by_id") else None
+        if user and user.get("api_key") and user.get("api_secret"):
+            self._init_client(user["api_key"], user["api_secret"], user.get("is_testnet", True))
 
         # Predictive Module State
         self.predictive_engine = PredictiveEngine()
@@ -340,15 +359,24 @@ class BinanceBot:
             self._get_scoped_key("accumulated_qty"), 0.0, user_id=user_id))
         self.highest_price = float(self.db.get_state(
             self._get_scoped_key("highest_price"), 0.0, user_id=user_id))
+        self.lowest_price = float(self.db.get_state(
+            self._get_scoped_key("lowest_price"), 0.0, user_id=user_id))
+        self.bars_held = int(self.db.get_state(
+            self._get_scoped_key("bars_held"), 0, user_id=user_id))
+        self.position_side = str(self.db.get_state(
+            self._get_scoped_key("position_side"), "LONG", user_id=user_id))
         self._log(
-            f"State loaded for {self.symbol}: Pos={self.position_orders}, Entry={self.entry_price}, Qty={self.accumulated_qty}", "DEBUG")
+            f"State loaded for {self.symbol}: Pos={self.position_orders}, Entry={self.entry_price}, Qty={self.accumulated_qty}, Side={self.position_side}, Bars={self.bars_held}", "DEBUG")
 
     def _reset_position_state(self):
         """Centralized method to completely clear internal position state (Zero residue principle)."""
         self.highest_price = 0.0
+        self.lowest_price = 0.0
         self.entry_price = 0.0
         self.accumulated_qty = 0.0
         self.position_orders = 0
+        self.bars_held = 0
+        self.position_side = "LONG"
         self.crypto_dust = 0.0
         self.partial_traces = []
         self.last_buy_price = 0.0
@@ -360,6 +388,9 @@ class BinanceBot:
             "position_orders": 0,
             "accumulated_qty": 0.0,
             "highest_price": 0.0,
+            "lowest_price": 0.0,
+            "bars_held": 0,
+            "position_side": "LONG",
             "open_position": False,
             "last_buy_price": 0.0
         }
@@ -418,8 +449,6 @@ class BinanceBot:
             self.client = BinanceWrapper(
                 api_key, api_secret, testnet=is_testnet)
             self.is_testnet = is_testnet
-            self.db.save_state("credentials", {
-                               "api_key": api_key, "api_secret": api_secret, "is_testnet": is_testnet}, user_id=self.user_id)
 
             # Initialize data client (Mainnet) if using real data in testnet
             if is_testnet and self.use_real_data:
@@ -478,12 +507,20 @@ class BinanceBot:
         if not self.client:
             return
         try:
-            self.balance = self.client.get_account_balance("USDT")
-            asset = self.symbol.replace("USDT", "")
-            self.crypto_balance = self.client.get_account_balance(asset)
-            # Log critical balance info
-            self._log(
-                f"📊 Balance leído: {self.balance:.2f} USDT | {self.crypto_balance:.6f} {asset}", "DEBUG")
+            if getattr(self, "market_type", "SPOT") == "FUTURES" and hasattr(self.client, "get_futures_account_balance"):
+                fb = self.client.get_futures_account_balance("USDT")
+                self.balance = float(fb.get("available", 0.0))
+                self.total_balance = float(fb.get("total", 0.0))
+                self.crypto_balance = 0.0
+                self._log(
+                    f"📊 Futures Balance: {self.balance:.2f} USDT disp / {self.total_balance:.2f} USDT total", "DEBUG")
+            else:
+                self.balance = self.client.get_account_balance("USDT")
+                asset = self.symbol.replace("USDT", "")
+                self.crypto_balance = self.client.get_account_balance(asset)
+                # Log critical balance info
+                self._log(
+                    f"📊 Balance leído: {self.balance:.2f} USDT | {self.crypto_balance:.6f} {asset}", "DEBUG")
         except Exception as e:
             self._log(f"Balance fetch failed: {e}", "WARNING")
 
@@ -499,6 +536,9 @@ class BinanceBot:
 
             with self.lock:
                 self.current_price = new_price
+                if self.accumulated_qty > 0:
+                    self.highest_price = max(self.highest_price, new_price)
+                    self.lowest_price = min(self.lowest_price, new_price) if self.lowest_price > 0 else new_price
 
                 # Update history in real-time so chart stays synchronized
                 if self.history:
@@ -573,9 +613,46 @@ class BinanceBot:
                 self._log(
                     f"Error calculating chart indicators: {e}", "WARNING")
 
+            # Calculate technical metrics aligned with Quant Strategy
+            if len(df) >= 20:
+                last_vol = float(df['volume'].iloc[-1])
+                vol_ma20 = float(df['volume'].rolling(20).mean().iloc[-1])
+                self.rvol = round(last_vol / vol_ma20 if vol_ma20 > 0 else 1.0, 4)
+            else:
+                self.rvol = 1.0
+
+            last_h = float(df['high'].iloc[-1])
+            last_l = float(df['low'].iloc[-1])
+            last_c = float(df['close'].iloc[-1])
+            rng = last_h - last_l
+            self.candle_close_pct = round((last_c - last_l) / rng if rng > 0 else 0.5, 4)
+
+            # Lead-Lag macro lead vs BTC anchor
+            if self.market_data_service and self.symbol != "BTCUSDT":
+                try:
+                    df_btc = self.market_data_service.get_historical_data("BTCUSDT", self.timeframe, limit=200)
+                    if df_btc is not None and not df_btc.empty:
+                        lead_res = self.lead_lag_analyzer.analyze(df, df_btc, "BTCUSDT", self.symbol)
+                        self.macro_lead = float(lead_res.get("lead_lag_score", 0.0) or 0.0)
+                    else:
+                        self.macro_lead = 0.0
+                except Exception:
+                    self.macro_lead = 0.0
+            else:
+                self.macro_lead = 0.0
+
             with self.lock:
                 for key, val in indicators.items():
                     setattr(self, key, val)
+
+                # Dynamic exits tracking on closed candle
+                if self.accumulated_qty > 0:
+                    self.bars_held += 1
+                    self.highest_price = max(self.highest_price, last_h)
+                    self.lowest_price = min(self.lowest_price, last_l) if self.lowest_price > 0 else last_l
+                    self.db.save_state(self._get_scoped_key("bars_held"), self.bars_held, user_id=self.user_id)
+                    self.db.save_state(self._get_scoped_key("highest_price"), self.highest_price, user_id=self.user_id)
+                    self.db.save_state(self._get_scoped_key("lowest_price"), self.lowest_price, user_id=self.user_id)
 
                 # Run Predictive Analysis + Kronos Forecast
                 if self.current_price > 0:
@@ -891,6 +968,9 @@ class BinanceBot:
         indicators['adx'] = getattr(self, 'adx', 0)
         indicators['fluctuation_factor'] = getattr(
             self, 'fluctuation_factor', 0)
+        indicators['rvol'] = getattr(self, 'rvol', 1.0)
+        indicators['candle_close_pct'] = getattr(self, 'candle_close_pct', 0.5)
+        indicators['macro_lead'] = getattr(self, 'macro_lead', 0.0)
 
         settings = self.get_settings()
         market_score = float(self.prediction.get("market_score", 50) or 50)
@@ -936,6 +1016,16 @@ class BinanceBot:
                     buy_sig_checked = True
                     entry_reason = "dca_step_reached"
         else:
+            # Global account 1-position constraint check across entire Binance Futures account
+            if getattr(self, "market_type", "SPOT") == "FUTURES" and self.client:
+                if hasattr(self.client, "get_futures_open_positions"):
+                    open_positions = self.client.get_futures_open_positions()
+                    if open_positions:
+                        active_syms = [p.get("symbol") for p in open_positions]
+                        if self.symbol not in active_syms or self.accumulated_qty <= 0:
+                            self.last_buy_block_reason = f"account_active_positions_{','.join(active_syms)}"
+                            return
+
             # MUTUAL EXCLUSION RULE (Optional): No operar BTC y SOL al mismo tiempo.
             if self.enable_mutual_exclusion:
                 try:
@@ -1006,13 +1096,19 @@ class BinanceBot:
         if sell_sig_checked:
             if self.enable_selling:
                 self._log(
-                    f"📉 SEÑAL DE VENTA DETECTADA por {strategy.name}", "INFO")
-                qty_to_sell = self._calculate_sell_qty(self.crypto_balance)
-                _, _ = self._place_sell_order(
-                    self.symbol, qty_to_sell, self.current_price, f"{strategy.name}-SELL")
+                    f"📉 SEÑAL DE SALIDA DETECTADA por {strategy.name}", "INFO")
+                if getattr(self, "market_type", "SPOT") == "FUTURES":
+                    qty_to_close = self.accumulated_qty
+                    side_to_send = "BUY" if getattr(self, "position_side", "LONG") == "SHORT" else "SELL"
+                    _, _ = self._place_sell_order(
+                        self.symbol, qty_to_close, self.current_price, f"{strategy.name}-EXIT", side=side_to_send)
+                else:
+                    qty_to_sell = self._calculate_sell_qty(self.crypto_balance)
+                    _, _ = self._place_sell_order(
+                        self.symbol, qty_to_sell, self.current_price, f"{strategy.name}-SELL")
             else:
                 self._log(
-                    f"📉 SEÑAL DE VENTA DETECTADA pero 'enable_selling' es False.", "WARNING")
+                    f"📉 SEÑAL DE SALIDA DETECTADA pero 'enable_selling' es False.", "WARNING")
 
         elif buy_sig_checked:
             if self.enable_buying:
@@ -1034,26 +1130,36 @@ class BinanceBot:
                         f"⛔ BUY BLOCKED ({strategy.name}): {reason}", "WARNING")
                     return
 
+                # Determine position side for Futures (LONG vs SHORT)
+                chosen_dir = "LONG"
+                if getattr(self, "market_type", "SPOT") == "FUTURES" and hasattr(strategy, "evaluate_setup"):
+                    setup_res = strategy.evaluate_setup(indicators, settings, state)
+                    chosen_dir = setup_res.get("side", "LONG")
+                self.position_side = chosen_dir
+                self.db.save_state(self._get_scoped_key("position_side"), self.position_side, user_id=self.user_id)
+
+                entry_side = "SELL" if chosen_dir == "SHORT" else "BUY"
                 self._log(
-                    f"🚀 SEÑAL DE COMPRA DETECTADA por {strategy.name}", "INFO")
+                    f"🚀 SEÑAL DE ENTRADA ({chosen_dir} -> {entry_side}) DETECTADA por {strategy.name}", "INFO")
                 order_qty = self._resolve_auto_buy_qty()
                 self._log_entry_decision(
                     strategy=strategy.name,
-                    signal="BUY",
+                    signal=entry_side,
                     allowed=True,
                     reason="entry_gates_passed",
                     score=self.last_buy_signal_score,
                     threshold=settings.get("smart_scalper_entry_score", 0),
                     market_score=market_score,
-                    detail=f"qty={order_qty}",
+                    detail=f"side={chosen_dir},qty={order_qty}",
                     indicators=indicators,
                 )
                 _, _ = self._place_buy_order(
                     self.symbol,
                     order_qty,
                     self.current_price,
-                    f"{strategy.name}-BUY",
+                    f"{strategy.name}-{entry_side}",
                     is_quote=True if self.auto_position_sizing else (self.trade_qty_type == "quote"),
+                    side=entry_side,
                 )
             else:
                 self._log_entry_decision(
@@ -1111,13 +1217,11 @@ class BinanceBot:
                 final_qty = executed_qty * \
                     (1 - self.testnet_commission_pct / 100)
 
-        pnl = 0.0
-        if side == "SELL" and self.entry_price > 0:
-            pnl = (quote_qty - quote_fee - self.entry_price * executed_qty
-                   if self.is_paper else
-                   (actual_price - self.entry_price) * executed_qty)
+        is_futures = getattr(self, "market_type", "SPOT") == "FUTURES"
+        is_entry = (side == "BUY" and (not is_futures or self.position_side == "LONG")) or (side == "SELL" and is_futures and self.position_side == "SHORT")
 
-        if side == "BUY":
+        pnl = 0.0
+        if is_entry:
             new_val = (self.accumulated_qty * self.entry_price) + \
                 (quote_qty if self.is_paper else actual_price * final_qty)
             new_qty = self.accumulated_qty + final_qty
@@ -1125,15 +1229,20 @@ class BinanceBot:
             self.accumulated_qty = new_qty
             self.position_orders += 1
             self.open_position = True
-
-            # ✅ SENIOR FIX: Reset highest_price on every BUY (DCA or Initial)
-            # This ensures trailing only starts from the new (potentially adjusted) price level
-            # and prevents using historical peaks that are no longer relevant to the new entry.
-            self.highest_price = 0.0
+            self.highest_price = actual_price
+            self.lowest_price = actual_price
+            self.bars_held = 0
             self.last_buy_price = actual_price
             self._log(
-                f"📥 Position Updated ({side} {strategy}): Entry=${self.entry_price:.2f} | Qty={self.accumulated_qty:.6f}", "INFO")
+                f"📥 Position Updated ({side} {self.position_side} {strategy}): Entry=${self.entry_price:.2f} | Qty={self.accumulated_qty:.6f}", "INFO")
         else:
+            if is_futures and self.position_side == "SHORT":
+                pnl = (self.entry_price - actual_price) * executed_qty
+            else:
+                pnl = (quote_qty - quote_fee - self.entry_price * executed_qty
+                       if self.is_paper else
+                       (actual_price - self.entry_price) * executed_qty)
+
             if pnl < 0:
                 self._consecutive_losses += 1
             elif pnl > 0:
@@ -1149,12 +1258,10 @@ class BinanceBot:
                 self._log(
                     f"⏸ Trading halted by loss guard for {self.cooldown_minutes}m", "WARNING")
 
-            # Update accumulated quantity after a SELL
+            # Update accumulated quantity after exit
             self.accumulated_qty = max(
                 0.0, self.accumulated_qty - executed_qty)
 
-            # REQUIREMENT: Reset complete internal state after any sale that clears the position
-            # Use 1 USDT threshold to handle dust and fees
             current_notional = self.accumulated_qty * actual_price
             if current_notional < 1.0:
                 if self.accumulated_qty > 0:
@@ -1162,7 +1269,6 @@ class BinanceBot:
                         f"🧹 Position cleared: Remaining {self.accumulated_qty:.8f} is Dust/Fees.", "INFO")
 
                 self._reset_position_state()
-                # Ensure balance sync is immediate after a total sale
                 self._update_account_balances()
 
         # Persist State
@@ -1171,6 +1277,9 @@ class BinanceBot:
             "position_orders": self.position_orders,
             "accumulated_qty": self.accumulated_qty,
             "highest_price": self.highest_price,
+            "lowest_price": self.lowest_price,
+            "bars_held": self.bars_held,
+            "position_side": self.position_side,
             "open_position": self.open_position,
             "last_buy_price": self.last_buy_price
         }
@@ -1233,14 +1342,20 @@ class BinanceBot:
 
     def _submit_order(self, symbol: str, side: str, quantity: float,
                       price: float, strategy: str,
-                      quote_order_qty: float | None = None):
+                      quote_order_qty: float | None = None,
+                      position_side: str | None = None):
         with self._order_lock:
-            if side == "BUY" and not self.is_testnet:
-                raise RuntimeError("Compras REAL bloqueadas: validacion y auditoria pendientes")
+            if not self.is_testnet and not self.is_paper:
+                allow_live = getattr(self, "allow_real_trading", False) or (
+                    str(self.db.get_setting("allow_real_trading", "false", user_id=self.user_id)).lower() == "true"
+                )
+                if not allow_live:
+                    raise RuntimeError("Ejecución REAL bloqueada: habilite 'allow_real_trading' en configuración")
             if self.pending_order:
                 raise OrderStatusUnknown(
                     self.pending_order["symbol"], self.pending_order["client_order_id"])
 
+            pos_side = position_side or getattr(self, "position_side", "LONG")
             client_order_id = f"ba{uuid4().hex}"
             pending = {
                 "client_order_id": client_order_id,
@@ -1250,20 +1365,44 @@ class BinanceBot:
                 "quote_order_qty": quote_order_qty,
                 "strategy": strategy,
                 "price": price,
+                "position_side": pos_side,
             }
             self.db.save_state("pending_order", pending, user_id=self.user_id)
             self.pending_order = pending
 
             try:
-                # Use smart Post-Only GTX maker execution for Futures paper when configured
-                if getattr(self, "market_type", "SPOT") == "FUTURES" and self.order_execution_style == "LIMIT_MAKER" and hasattr(self.client, "place_smart_maker_order"):
-                    trade = self.client.place_smart_maker_order(
-                        symbol, side, quantity, quote_order_qty=quote_order_qty,
-                        client_order_id=client_order_id)
+                is_futures = getattr(self, "market_type", "SPOT") == "FUTURES"
+                is_close = False
+                if is_futures:
+                    # Enforce ISOLATED 2x margin setup on exchange
+                    if hasattr(self.client, "setup_futures_symbol"):
+                        self.client.setup_futures_symbol(
+                            symbol,
+                            leverage=int(getattr(self, "futures_leverage", 2) or 2),
+                            margin_type="ISOLATED",
+                        )
+                    if (pos_side == "LONG" and side == "SELL") or (pos_side == "SHORT" and side == "BUY"):
+                        is_close = True
+
+                    if self.order_execution_style == "LIMIT_MAKER" and hasattr(self.client, "place_smart_maker_order"):
+                        trade = self.client.place_smart_maker_order(
+                            symbol, side, quantity, quote_order_qty=quote_order_qty,
+                            reduce_only=is_close,
+                            client_order_id=client_order_id)
+                    elif hasattr(self.client, "place_futures_order"):
+                        trade = self.client.place_futures_order(
+                            symbol, side, quantity, order_type="MARKET",
+                            reduce_only=is_close,
+                            client_order_id=client_order_id)
+                    else:
+                        trade = self.client.place_order(
+                            symbol, side, quantity, quote_order_qty=quote_order_qty,
+                            client_order_id=client_order_id)
                 else:
                     trade = self.client.place_order(
                         symbol, side, quantity, quote_order_qty=quote_order_qty,
                         client_order_id=client_order_id)
+
                 if not trade:
                     raise OrderStatusUnknown(symbol, client_order_id)
 
@@ -1280,6 +1419,25 @@ class BinanceBot:
                 if not result:
                     raise OrderStatusUnknown(symbol, client_order_id)
                 self._clear_pending_order()
+
+                # Native exchange-side STOP_MARKET for Futures entries
+                if is_futures and not is_close:
+                    try:
+                        self._place_exchange_stop_protection(symbol, side, executed_qty, price)
+                    except Exception as stop_exc:
+                        self._log(f"CRITICAL: Stop market failed: {stop_exc}. Emergency market close.", "ERROR")
+                        emergency_side = "SELL" if side == "BUY" else "BUY"
+                        if hasattr(self.client, "place_futures_order"):
+                            self.client.place_futures_order(
+                                symbol, emergency_side, executed_qty, order_type="MARKET", reduce_only=True
+                            )
+                        raise RuntimeError(f"FAIL_LOUD_STOP_FAILED: {stop_exc}")
+
+                # If position closed on futures, cancel open orders (e.g. pending stop)
+                if is_futures and is_close:
+                    if hasattr(self.client, "cancel_futures_symbol_orders"):
+                        self.client.cancel_futures_symbol_orders(symbol)
+
                 return result
             except OrderStatusUnknown:
                 self._halt_for_pending_order()
@@ -1297,8 +1455,22 @@ class BinanceBot:
                         self._halt_for_pending_order()
                 raise
 
-    def _place_buy_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO", is_quote: bool = False):
-        """Validates and places a BUY order on Binance."""
+    def _place_exchange_stop_protection(self, symbol: str, entry_side: str, qty: float, fill_price: float):
+        """Places native STOP_MARKET order on USDⓈ-M Futures exchange-side immediately following entry fill."""
+        if not hasattr(self.client, "place_futures_stop_market"):
+            return
+        stop_side = "SELL" if entry_side == "BUY" else "BUY"
+        atr_val = float(getattr(self, "atr", 0.0) or 0.0)
+        atr_dist = max(atr_val * float(getattr(self, "atr_stop_mult", 1.6) or 1.6), fill_price * (float(self.stop_loss_pct) / 100.0))
+        if entry_side == "BUY":
+            stop_price = fill_price - atr_dist
+        else:
+            stop_price = fill_price + atr_dist
+        self._log(f"🛡️ Colocando orden nativa exchange STOP_MARKET {symbol}: side={stop_side}, stopPrice={stop_price:.4f}", "INFO")
+        self.client.place_futures_stop_market(symbol=symbol, side=stop_side, stop_price=stop_price, quantity=qty)
+
+    def _place_buy_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO", is_quote: bool = False, side: str = "BUY"):
+        """Validates and places an entry order (BUY for LONG, SELL for SHORT) on Binance."""
         try:
             if self.pending_order:
                 raise OrderStatusUnknown(
@@ -1306,25 +1478,31 @@ class BinanceBot:
             if quantity <= 0:
                 return None, "tamano de orden bloqueado por riesgo"
             if self.sniper_mode:
-                # Calculate All-In amount
                 quantity = self.balance * \
                     0.98 if is_quote else (self.balance * 0.98 / price)
                 self._log(
                     f"🎯 Sniper Mode Active: Adjusted quantity to {quantity} {'USDT' if is_quote else 'units'}", "DEBUG")
 
-            is_valid, reason = self.client.validate_order(
-                symbol, quantity, price, is_quote_qty=is_quote)
+            is_futures = getattr(self, "market_type", "SPOT") == "FUTURES"
+            if is_futures and hasattr(self.client, "validate_futures_order"):
+                base_qty = quantity / price if is_quote and price > 0 else quantity
+                is_valid, reason = self.client.validate_futures_order(symbol, base_qty, price)
+                if is_valid:
+                    quantity = base_qty
+                    is_quote = False
+            else:
+                is_valid, reason = self.client.validate_order(
+                    symbol, quantity, price, is_quote_qty=is_quote)
 
             if not is_valid:
-                # Try to adjust to min notional if it failed validation
                 adj = self.client.adjust_to_min_notional(
-                    symbol, quantity, price, is_quote_qty=is_quote)
+                    symbol, quantity, price, is_quote_qty=is_quote) if hasattr(self.client, "adjust_to_min_notional") else None
                 if adj and (not self.auto_position_sizing or strategy == "MANUAL"):
                     self._log(
                         format_decision_trace(
                             "ORDER_DECISION",
                             symbol=symbol,
-                            side="BUY",
+                            side=side,
                             allowed=True,
                             reason="min_notional_adjusted",
                             qty=quantity,
@@ -1342,7 +1520,7 @@ class BinanceBot:
                         format_decision_trace(
                             "ORDER_DECISION",
                             symbol=symbol,
-                            side="BUY",
+                            side=side,
                             allowed=False,
                             reason=order_reason_code(reason),
                             qty=quantity,
@@ -1351,65 +1529,35 @@ class BinanceBot:
                         ),
                         "WARNING",
                     )
-                    self._log(f"❌ Aborting BUY: {reason}", "ERROR")
+                    self._log(f"❌ Aborting {side}: {reason}", "ERROR")
                     return None, reason
 
-            # Final check: do we actually have the balance for this adjusted quantity?
-            total_required = quantity if is_quote else quantity * price
-
-            # Auto-clamp if slightly over balance (Float precision fix)
-            if total_required > self.balance:
-                if is_quote:
-                    self._log(
-                        f"⚠️ Reduced Buy Qty from {quantity} to {self.balance} (Max Balance)", "DEBUG")
-                    quantity = self.balance
-                    total_required = quantity
-                else:
-                    # For base asset, we can't easily adjust without recalc step size.
-                    # If margin caused it, fail.
-                    err_msg = f"Insufficient balance for order: Required {total_required:.2f} USDT, have {self.balance:.2f} USDT"
-                    self._log(
-                        format_decision_trace(
-                            "ORDER_DECISION",
-                            symbol=symbol,
-                            side="BUY",
-                            allowed=False,
-                            reason="balance_insufficient",
-                            qty=quantity,
-                            price=price,
-                            required=round(total_required, 4),
-                            balance=round(float(self.balance), 4),
-                        ),
-                        "WARNING",
-                    )
+            # Balance & Margin Check
+            if is_futures:
+                lev = float(getattr(self, "futures_leverage", 2) or 2)
+                required_margin = (quantity * price) / lev
+                if required_margin > self.balance:
+                    err_msg = f"Insufficient futures available margin: Required {required_margin:.2f} USDT, have {self.balance:.2f} USDT"
                     self._log(f"❌ {err_msg}", "ERROR")
                     return None, err_msg
-
-            is_valid, reason = self.client.validate_order(
-                symbol, quantity, price, is_quote_qty=is_quote)
-            if not is_valid:
-                self._log(
-                    format_decision_trace(
-                        "ORDER_DECISION",
-                        symbol=symbol,
-                        side="BUY",
-                        allowed=False,
-                        reason=order_reason_code(reason),
-                        qty=quantity,
-                        price=price,
-                        detail=reason,
-                    ),
-                    "WARNING",
-                )
-                self._log(
-                    f"âŒ Aborting BUY after final validation: {reason}", "ERROR")
-                return None, reason
+            else:
+                total_required = quantity if is_quote else quantity * price
+                if total_required > self.balance:
+                    if is_quote:
+                        self._log(
+                            f"⚠️ Reduced Buy Qty from {quantity} to {self.balance} (Max Balance)", "DEBUG")
+                        quantity = self.balance
+                        total_required = quantity
+                    else:
+                        err_msg = f"Insufficient balance for order: Required {total_required:.2f} USDT, have {self.balance:.2f} USDT"
+                        self._log(f"❌ {err_msg}", "ERROR")
+                        return None, err_msg
 
             self._log(
                 format_decision_trace(
                     "ORDER_DECISION",
                     symbol=symbol,
-                    side="BUY",
+                    side=side,
                     allowed=True,
                     reason="submitting_order",
                     qty=quantity,
@@ -1419,8 +1567,10 @@ class BinanceBot:
                 "INFO",
             )
             result = self._submit_order(
-                symbol, "BUY", quantity, price, strategy,
-                quote_order_qty=quantity if is_quote else None)
+                symbol, side, quantity, price, strategy,
+                quote_order_qty=(quantity if is_quote else None),
+                position_side=getattr(self, "position_side", "LONG"),
+            )
             return result, None
         except Exception as e:
             err_msg = f"Exception in _place_buy_order: {str(e)}"
@@ -1428,7 +1578,7 @@ class BinanceBot:
                 format_decision_trace(
                     "ORDER_DECISION",
                     symbol=symbol,
-                    side="BUY",
+                    side=side,
                     allowed=False,
                     reason=order_reason_code(str(e)),
                     qty=quantity,
@@ -1440,55 +1590,46 @@ class BinanceBot:
             self._log(f"❌ {err_msg}", "ERROR")
             return None, err_msg
 
-    def _place_sell_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO"):
-        """Validates and places a SELL order on Binance."""
+    def _place_sell_order(self, symbol: str, quantity: float, price: float, strategy: str = "AUTO", side: str = "SELL"):
+        """Validates and places an exit order on Binance."""
         try:
             if self.pending_order:
                 raise OrderStatusUnknown(
                     self.pending_order["symbol"], self.pending_order["client_order_id"])
-            # 1. Sanity check: quantity to sell vs balance
-            if quantity > self.crypto_balance:
-                self._log(
-                    f"⚠️ Adjusting sell quantity from {quantity} to available balance {self.crypto_balance}", "DEBUG")
-                quantity = self.crypto_balance
 
-            # 2. Log P&L for informational purposes only (no blocking)
-            if self.entry_price > 0:
-                gross_gain = (price - self.entry_price) * quantity
-                commissions = (self.entry_price * quantity *
-                               0.001) + (price * quantity * 0.001)
-                net_gain = gross_gain - commissions
-                position_value = self.entry_price * quantity
-                loss_pct = (net_gain / position_value *
-                            100) if position_value > 0 else 0
-
-                # Improved logging logic for profit/loss/break-even
-                if net_gain > 0.01:
-                    label = "✅ Vendiendo con GANANCIA"
-                elif net_gain < -0.01:
-                    label = "⚠️ Vendiendo con PÉRDIDA"
+            is_futures = getattr(self, "market_type", "SPOT") == "FUTURES"
+            if is_futures:
+                if quantity > self.accumulated_qty:
+                    quantity = self.accumulated_qty
+                if hasattr(self.client, "validate_futures_order"):
+                    is_valid, reason = self.client.validate_futures_order(symbol, quantity, price)
                 else:
-                    label = "⚖️ Vendiendo (Empate/Break-even)"
+                    is_valid, reason = True, "OK"
+            else:
+                if quantity > self.crypto_balance:
+                    self._log(
+                        f"⚠️ Adjusting sell quantity from {quantity} to available balance {self.crypto_balance}", "DEBUG")
+                    quantity = self.crypto_balance
+                is_valid, reason = self.client.validate_order(symbol, quantity, price)
 
-                self._log(
-                    f"{label}: {net_gain:.4f} USDT ({loss_pct:.2f}%) - {strategy}", "INFO")
-
-            is_valid, reason = self.client.validate_order(
-                symbol, quantity, price)
             if not is_valid:
                 adj = self.client.adjust_to_min_notional(
-                    symbol, quantity, price, is_quote_qty=False)
-                if adj and adj <= self.crypto_balance:
+                    symbol, quantity, price, is_quote_qty=False) if hasattr(self.client, "adjust_to_min_notional") else None
+                max_avail = self.accumulated_qty if is_futures else self.crypto_balance
+                if adj and adj <= max_avail:
                     self._log(
-                        f"⚠️ Adjusting sell qty to {adj} to meet minimum requirement", "INFO")
+                        f"⚠️ Adjusting exit qty to {adj} to meet minimum requirement", "INFO")
                     quantity = adj
                 else:
-                    self._log(f"❌ Aborting SELL: {reason}", "ERROR")
+                    self._log(f"❌ Aborting exit: {reason}", "ERROR")
                     return None, reason
 
             self._log(
-                f"📤 Enviando venta: {quantity} {symbol} @ {price} ({strategy})", "INFO")
-            result = self._submit_order(symbol, "SELL", quantity, price, strategy)
+                f"📤 Enviando orden de salida: {quantity} {symbol} @ {price} ({strategy})", "INFO")
+            result = self._submit_order(
+                symbol, side, quantity, price, strategy,
+                position_side=getattr(self, "position_side", "LONG"),
+            )
             return result, None
         except Exception as e:
             err_msg = f"Exception in _place_sell_order: {str(e)}"
@@ -1820,13 +1961,13 @@ class BinanceBot:
         )
 
     def _log(self, message: str, level: str = "INFO"):
-        """Logs bot messages to console and file, and sends Telegram alerts for errors."""
-        import sys
+        """Logs bot messages to console and rotating file, and sends Telegram alerts for errors."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         entry = f"[{timestamp}] [{level}] {message}"
         print(entry, flush=True)
-        with open("backend/logs/bot.log", "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+        if _bot_logger:
+            lvl = getattr(logging, level.upper(), logging.INFO)
+            _bot_logger.log(lvl, message)
         if level == "ERROR" and self.telegram_enabled:
             self.notifier.send_message(f"🚨 *ERROR BOT*\n{message}")
 

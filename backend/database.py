@@ -214,6 +214,12 @@ class DatabaseManager:
                     )
                 ''')
 
+            # Purge any legacy plaintext credentials saved in state
+            try:
+                cursor.execute("DELETE FROM state WHERE key = 'credentials'")
+            except Exception:
+                pass
+
             conn.commit()
 
     # ========== USER MANAGEMENT ==========
@@ -312,6 +318,24 @@ class DatabaseManager:
                 'api_secret': self._decrypt_value(row[3], str(user_id)),
                 'is_testnet': bool(row[4])
             }
+    def get_user_by_id(self, user_id: int):
+        """Get user by ID with decrypted credentials"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, username, api_key_encrypted, api_secret_encrypted, is_testnet
+                FROM users WHERE id = ?
+            ''', (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                'id': row[0],
+                'username': row[1],
+                'api_key': self._decrypt_value(row[2], str(row[0])),
+                'api_secret': self._decrypt_value(row[3], str(row[0])),
+                'is_testnet': bool(row[4])
+            }
 
     def set_user_session(self, user_id: int, token: str):
         """Set session token for user"""
@@ -400,6 +424,9 @@ class DatabaseManager:
     # ========== STATE ==========
 
     def save_state(self, key: str, value, user_id: int = 1):
+        if key == "credentials":
+            # Never store unencrypted credentials in plaintext state table
+            return
         with self._get_connection() as conn:
             cursor = conn.cursor()
             # If value is a dict or list, store as JSON

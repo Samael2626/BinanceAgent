@@ -242,6 +242,64 @@ class BinanceWrapper:
             )
         return True, "OK"
 
+    def normalize_futures_quantity(self, symbol: str, quantity: float) -> float:
+        """Rounds quantity to the nearest stepSize for the USDⓈ-M Futures symbol."""
+        info = self.get_futures_symbol_info(symbol)
+        if not info:
+            return float(quantity)
+
+        filters = {f.get("filterType"): f for f in info.get("filters", [])}
+        lot_filter = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE")
+        if lot_filter and "stepSize" in lot_filter:
+            return self._quantize_to_step(quantity, lot_filter["stepSize"], ROUND_DOWN)
+        return float(quantity)
+
+    def get_futures_account_balance(self, asset: str = "USDT") -> Dict[str, float]:
+        """
+        Fetches balance from Binance USDⓈ-M Futures.
+        Returns {'total': float, 'available': float}.
+        """
+        try:
+            acc = self.client.futures_account()
+            for a in acc.get("assets", []):
+                if a.get("asset") == asset:
+                    return {
+                        "total": float(a.get("walletBalance", 0.0) or 0.0),
+                        "available": float(a.get("availableBalance", 0.0) or 0.0),
+                    }
+            return {"total": 0.0, "available": 0.0}
+        except Exception as e:
+            logger.error("Error fetching futures balance: %s", e)
+            return {"total": 0.0, "available": 0.0}
+
+    def get_futures_open_positions(self) -> List[Dict[str, Any]]:
+        """
+        Fetches all open positions on Binance USDⓈ-M Futures across the entire account.
+        """
+        try:
+            positions = self.client.futures_position_information()
+            return [p for p in positions if abs(float(p.get("positionAmt", 0.0) or 0.0)) > 0.0]
+        except Exception as e:
+            logger.error("Error fetching open futures positions: %s", e)
+            return []
+
+    def setup_futures_symbol(self, symbol: str, leverage: int = 2, margin_type: str = "ISOLATED") -> bool:
+        """
+        Enforces margin type (ISOLATED) and leverage (default 2x) on the symbol.
+        Safely catches code -4046 ('No need to change margin type').
+        """
+        try:
+            try:
+                self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
+            except BinanceAPIException as e:
+                if getattr(e, "code", None) != -4046:
+                    raise
+            self.client.futures_change_leverage(symbol=symbol, leverage=int(leverage))
+            return True
+        except Exception as e:
+            logger.error("Error setting up futures symbol %s: %s", symbol, e)
+            raise
+
     def get_account_balance(self, asset: str) -> float:
         try:
             balance = self.client.get_asset_balance(asset=asset)
@@ -440,6 +498,113 @@ class BinanceWrapper:
     def get_order_by_client_id(self, symbol: str, client_order_id: str) -> dict:
         return self.client.get_order(
             symbol=symbol, origClientOrderId=client_order_id)
+
+    def place_futures_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        order_type: str = "MARKET",
+        price: float | None = None,
+        reduce_only: bool = False,
+        client_order_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Submits an order directly to Binance USDⓈ-M Futures.
+        """
+        client_order_id = client_order_id or f"ba{uuid4().hex}"
+        final_qty = self.normalize_futures_quantity(symbol, quantity)
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "quantity": "{:.8f}".format(float(final_qty)).rstrip('0').rstrip('.'),
+            "newClientOrderId": client_order_id,
+            "newOrderRespType": "RESULT",
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        if order_type in {"LIMIT", "LIMIT_MAKER"}:
+            params["type"] = "LIMIT"
+            params["timeInForce"] = "GTX" if order_type == "LIMIT_MAKER" else "GTC"
+            if price is None:
+                raise ValueError("Price is required for LIMIT orders")
+            params["price"] = "{:.8f}".format(float(price)).rstrip('0').rstrip('.')
+
+        try:
+            order = self.client.futures_create_order(**params)
+            return order
+        except BinanceAPIException as e:
+            if getattr(e, "code", None) == -1007:
+                return self._recover_futures_order(symbol, client_order_id)
+            logger.error(
+                "FUTURES_ORDER_API_ERROR code=%s message=%s",
+                getattr(e, "code", None),
+                getattr(e, "message", e),
+            )
+            raise e
+        except (RequestTimeout, RequestConnectionError):
+            return self._recover_futures_order(symbol, client_order_id)
+        except Exception as e:
+            logger.error("FUTURES_ORDER_API_ERROR detail=%s", e)
+            raise e
+
+    def place_futures_stop_market(
+        self,
+        symbol: str,
+        side: str,
+        stop_price: float,
+        quantity: float | None = None,
+        client_order_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Places a native STOP_MARKET order on USDⓈ-M Futures exchange-side.
+        Uses closePosition=True when quantity is None, or reduceOnly=True when quantity is specified.
+        """
+        client_order_id = client_order_id or f"ba_sl_{uuid4().hex[:12]}"
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "STOP_MARKET",
+            "stopPrice": "{:.8f}".format(float(stop_price)).rstrip('0').rstrip('.'),
+            "newClientOrderId": client_order_id,
+            "closePosition": "true",
+        }
+        if quantity is not None and quantity > 0:
+            final_qty = self.normalize_futures_quantity(symbol, quantity)
+            params["quantity"] = "{:.8f}".format(float(final_qty)).rstrip('0').rstrip('.')
+            del params["closePosition"]
+            params["reduceOnly"] = "true"
+
+        try:
+            order = self.client.futures_create_order(**params)
+            return order
+        except Exception as e:
+            logger.error("FUTURES_STOP_MARKET_ERROR symbol=%s detail=%s", symbol, e)
+            raise
+
+    def cancel_futures_symbol_orders(self, symbol: str) -> Dict[str, Any]:
+        """Cancels all open orders on Binance Futures for a symbol (e.g. pending stops)."""
+        try:
+            return self.client.futures_cancel_all_open_orders(symbol=symbol)
+        except Exception as e:
+            logger.warning("Could not cancel all open futures orders for %s: %s", symbol, e)
+            return {}
+
+    def get_futures_order_by_client_id(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
+        return self.client.futures_get_order(symbol=symbol, origClientOrderId=client_order_id)
+
+    def _recover_futures_order(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
+        try:
+            order = self.get_futures_order_by_client_id(symbol, client_order_id)
+            if order.get("status") in {"FILLED", "CANCELED", "EXPIRED"}:
+                return order
+        except Exception as exc:
+            logger.error(
+                "FUTURES_ORDER_RECONCILE_ERROR symbol=%s client_order_id=%s error=%s",
+                symbol, client_order_id, exc
+            )
+        raise OrderStatusUnknown(symbol, client_order_id)
 
     def start_kline_socket(self, symbol: str, interval: str, callback: Callable):
         """Starts a kline socket for the given symbol and interval with auto-reconnect."""

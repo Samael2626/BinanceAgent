@@ -409,7 +409,7 @@ def simulate_random_futures_baseline(
     target_trades_per_symbol: int = 55,
     runs: int = 80,
     seed: int = 42,
-    notional_per_trade: float = 12.0,
+    notional_per_trade: float = 20.0,
 ) -> float:
     """
     Computes the 95th percentile (p95) of net expectancy (USDT/trade) across `runs`
@@ -577,29 +577,43 @@ def main() -> None:
         agg = pd.concat(curves, axis=1).ffill().fillna(47.0).sum(axis=1)
         pooled_curve = [{"time": k, "equity": float(v)} for k, v in agg.items()]
         m = metrics.compute(all_trades, pooled_curve, 47.0 * len(curves))
-        rand_p95 = simulate_random_futures_baseline(frames_oos, cm)
+        rand_p95 = simulate_random_futures_baseline(frames_oos, cm, notional_per_trade=args.notional)
         print(f"\n[{label}]")
+        print(f"  [Pooled Statistical Sample - Universe]")
         print(f"  {m.row()}")
-        print(f"  Random Monte Carlo p95 E/trade = {rand_p95:+.4f} USDT")
+        print(f"  Random Monte Carlo p95 E/trade ({args.notional:.1f} USDT) = {rand_p95:+.4f} USDT")
         g = gate.assess_backtest(m, random_p95=rand_p95, max_drawdown_pct=8.0)
         print(f"  Gate passed={g.passed} reasons={g.reasons}")
 
-        # Live 1-position global portfolio execution metrics (matching production rule: 'Una posicion a la vez')
+        # Live 1-position global portfolio execution metrics (matching production rule: 'Una posicion a la vez' on 47 USDT wallet)
         sorted_trades = sorted(all_trades, key=lambda x: x["entry_time"])
         live_trades = []
         free_t = None
+        current_eq = 47.0
+        single_curve_pts = {}
         for tr in sorted_trades:
             if free_t is None or tr["entry_time"] >= free_t:
                 live_trades.append(tr)
                 free_t = tr["exit_time"]
-        if live_trades:
+                current_eq += tr["net_pnl"]
+                single_curve_pts[tr["exit_time"]] = current_eq
+
+        if live_trades and curves:
+            base_idx = curves[0].index
+            s_single = pd.Series(single_curve_pts)
+            s_single.index = pd.to_datetime(s_single.index, utc=True)
+            s_single = s_single.reindex(base_idx.union(s_single.index)).ffill().fillna(47.0)
+            single_curve = [{"time": k, "equity": float(v)} for k, v in s_single.items()]
+            m_single = metrics.compute(live_trades, single_curve, 47.0)
+            print(f"  [Live Production 1-Pos Concurrency - $47 Wallet]")
+            print(f"  {m_single.row()}")
             sp_wins = [t for t in live_trades if t["net_pnl"] > 0]
             sp_wr = len(sp_wins) / len(live_trades) * 100.0
             sp_gw = sum(t["net_pnl"] for t in sp_wins)
             sp_gl = sum(abs(t["net_pnl"]) for t in live_trades if t["net_pnl"] <= 0)
             sp_pf = sp_gw / sp_gl if sp_gl > 0 else 999.0
             sp_net = sum(t["net_pnl"] for t in live_trades)
-            print(f"  [Live Production 1-Pos Concurrency] N={len(live_trades)}  WR={sp_wr:5.1f}%  PF={sp_pf:4.2f}  Net={sp_net:+6.2f} USDT")
+            print(f"  Details: N={len(live_trades)}  WR={sp_wr:5.1f}%  PF={sp_pf:4.2f}  Net={sp_net:+6.2f} USDT ({(sp_net/47.0)*100.0:+.2f}%)")
 
 
 if __name__ == "__main__":
