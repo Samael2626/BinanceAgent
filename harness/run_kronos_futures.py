@@ -258,6 +258,25 @@ def simulate_futures_kronos(
                 cooldown_until = i + 6
 
         elif i >= cooldown_until and i + 1 < end_idx and not lats[i]:
+            # Evaluate BTC anchor snapshot
+            macro_lead: dict[str, Any] = {}
+            btc_trend = "NEUTRAL"
+            if lead_analyzer is not None and btc_prep is not None and t in btc_time_to_idx:
+                b_idx = btc_time_to_idx[t]
+                btc_c = btc_closes[b_idx]
+                btc_ret1 = (btc_c / btc_closes[b_idx - 1] - 1.0) * 100.0 if b_idx > 0 else 0.0
+                snap = lead_analyzer.evaluate(
+                    btc_current_price=btc_c,
+                    btc_ema_fast=btc_f_ema[b_idx],
+                    btc_ema_trend=btc_t_ema[b_idx],
+                    btc_return_1h_pct=btc_ret1,
+                )
+                macro_lead = snap.to_dict()
+                btc_trend = snap.trend
+
+            # Macro BTC alignment: no alt shorts into a BTC bullish trend (anti-squeeze shield)
+            short_allowed = (btc_trend != "BULLISH")
+
             # High-Conviction Asymmetric Pre-Filter with Anti-Wick Quality Gate
             rvol = vols[i] / max(vol_sma[i], 1e-12)
             bar_range = max(highs[i] - lows[i], 1e-6)
@@ -281,10 +300,11 @@ def simulate_futures_kronos(
                 and (adxs[i] >= 25.0)
                 and (c < t_ema[i])
                 and (ema_50[i] < t_ema[i])
-                and (rsis[i] <= 48.0 and rsis[i] >= 28.0)
+                and (rsis[i] <= 48.0 and rsis[i] >= 33.0)
                 and bear_candle_ok
+                and short_allowed
             )
-            is_short_squeeze_flush = (z_score_arr[i] >= 2.8) and (rvol >= 2.2) and (rsis[i] >= 75.0)
+            is_short_squeeze_flush = (z_score_arr[i] >= 2.8) and (rvol >= 2.2) and (rsis[i] >= 75.0) and short_allowed
 
             if not (is_bull_breakout or is_bear_breakout or is_long_liq_flush or is_short_squeeze_flush):
                 curve.append({"time": t, "equity": float(wallet)})
@@ -322,19 +342,6 @@ def simulate_futures_kronos(
             # Add microstructure regime bonus for confirmed breakout / flush
             micro_long = 15.0 if (is_long_liq_flush or is_bull_breakout) else -20.0
             micro_short = 15.0 if (is_bear_breakout or is_short_squeeze_flush) else -20.0
-
-            macro_lead: dict[str, Any] = {}
-            if lead_analyzer is not None and btc_prep is not None and t in btc_time_to_idx:
-                b_idx = btc_time_to_idx[t]
-                btc_c = btc_closes[b_idx]
-                btc_ret1 = (btc_c / btc_closes[b_idx - 1] - 1.0) * 100.0 if b_idx > 0 else 0.0
-                snap = lead_analyzer.evaluate(
-                    btc_current_price=btc_c,
-                    btc_ema_fast=btc_f_ema[b_idx],
-                    btc_ema_trend=btc_t_ema[b_idx],
-                    btc_return_1h_pct=btc_ret1,
-                )
-                macro_lead = snap.to_dict()
 
             st = {
                 "current_price": c,
@@ -510,7 +517,7 @@ def main() -> None:
     parser.add_argument(
         "--symbols",
         nargs="+",
-        default=["SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "BNBUSDT"],
+        default=["ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "BNBUSDT"],
     )
     parser.add_argument("--tf", default="1h")
     args = parser.parse_args()

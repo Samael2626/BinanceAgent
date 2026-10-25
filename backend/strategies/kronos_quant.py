@@ -219,6 +219,17 @@ class KronosQuantStrategy(BaseStrategy):
                 chosen_side = "NONE"
                 chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
 
+        # Macro-Concurrencia Estricta con Bitcoin (Anti-Squeeze Shield)
+        # Altcoins are severely squeezed if shorted while BTC is bullish
+        if chosen_side == "SHORT" and btc_trend == "BULLISH":
+            chosen_side = "NONE"
+            chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
+
+        # RSI Exhaustion Floor: do not open SHORT if already deeply oversold (reversal zone)
+        if chosen_side == "SHORT" and rsi < 33.0:
+            chosen_side = "NONE"
+            chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
+
         # Map net EV (bps) into the 0..100 score scale used by BinanceBot & Scanner
         # At chosen_ev == min_ev_bps -> score = 65.0; +35 bps above threshold -> 100.0
         raw_score = 65.0 + (chosen_ev - min_ev_bps) * 1.0

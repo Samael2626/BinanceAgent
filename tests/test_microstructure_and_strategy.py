@@ -199,10 +199,45 @@ def test_lead_lag_analyzer_and_macro_bias():
     assert any("Lead=BULLISH" in r for r in eval_bull["reasons"])
 
 
+def test_hard_btc_alignment_and_rsi_floor():
+    strat = KronosQuantStrategy()
+    base_settings = {
+        "market_type": "FUTURES",
+        "futures_allow_short": True,
+        "stop_loss_pct": 1.5,
+        "take_profit_pct": 2.0,
+        "kronos_min_ev_bps": 12.0,
+        "smart_scalper_entry_score": 65.0,
+    }
+
+    # 1. Reject SHORT when BTC is BULLISH
+    ind_short = {"rsi": 45.0, "macd_hist": -0.2, "trend_ema": 105.0, "fast_ema": 102.0, "adx": 30.0, "atr": 1.0, "is_lateral": False}
+    st_btc_bull = {
+        "current_price": 100.0,
+        "kronos_forecast": {"prob_up_net": 0.20, "prob_down_net": 0.68, "expected_return_pct": -1.5, "volatility_amp": 1.2, "rank_score": 85.0},
+        "macro_lead": {"trend": "BULLISH", "bias_bps": 14.0},
+        "microstructure": {"long_edge_bps_adj": -10.0, "short_edge_bps_adj": 15.0, "oi_regime": "SHORT_BUILDUP"},
+    }
+    eval_short_blocked = strat.evaluate_setup(ind_short, base_settings, st_btc_bull)
+    assert eval_short_blocked["side"] == "NONE"
+
+    # 2. Reject SHORT when RSI < 33.0 (exhaustion zone)
+    ind_rsi_oversold = {**ind_short, "rsi": 29.0}
+    st_btc_bear = {
+        "current_price": 100.0,
+        "kronos_forecast": {"prob_up_net": 0.20, "prob_down_net": 0.68, "expected_return_pct": -1.5, "volatility_amp": 1.2, "rank_score": 85.0},
+        "macro_lead": {"trend": "BEARISH", "bias_bps": -14.0},
+        "microstructure": {"long_edge_bps_adj": -10.0, "short_edge_bps_adj": 15.0, "oi_regime": "SHORT_BUILDUP"},
+    }
+    eval_rsi_blocked = strat.evaluate_setup(ind_rsi_oversold, base_settings, st_btc_bear)
+    assert eval_rsi_blocked["side"] == "NONE"
+
+
 if __name__ == "__main__":
     test_microstructure_obi_and_regimes()
     test_kronos_quant_meta_labeling_long_short_and_gate()
     test_order_flow_imbalance_calculation()
     test_lead_lag_analyzer_and_macro_bias()
+    test_hard_btc_alignment_and_rsi_floor()
     print("all microstructure and lead-lag tests passed!")
 
