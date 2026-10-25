@@ -183,8 +183,8 @@ def simulate_futures_kronos(
             atr_now = max(atrs[i], entry_price * 0.005)
             if pos_side == "LONG":
                 # Confirmed closed-bar profit protection:
-                if not be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0110:
-                    stop_price = max(stop_price, entry_price * 1.0020)
+                if not be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0100:
+                    stop_price = max(stop_price, entry_price * 1.0025)
                     be_locked = True
                 elif be_locked and i > entry_bar_idx and closes[i - 1] >= entry_price * 1.0145:
                     stop_price = max(stop_price, entry_price * 1.0060)
@@ -207,8 +207,8 @@ def simulate_futures_kronos(
                         exit_mid, reason = c, "SCRATCH_LONG"
             else:
                 # Confirmed closed-bar profit protection:
-                if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9890:
-                    stop_price = min(stop_price, entry_price * 0.9980)
+                if not be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9900:
+                    stop_price = min(stop_price, entry_price * 0.9975)
                     be_locked = True
                 elif be_locked and i > entry_bar_idx and closes[i - 1] <= entry_price * 0.9855:
                     stop_price = min(stop_price, entry_price * 0.9940)
@@ -300,7 +300,7 @@ def simulate_futures_kronos(
             )
             is_bear_breakout = (
                 (c < donchian_low_36[i])
-                and (rvol >= 1.6)
+                and (rvol >= 1.8)
                 and (adxs[i] >= 25.0)
                 and (c < t_ema[i])
                 and (ema_50[i] < t_ema[i])
@@ -462,8 +462,8 @@ def simulate_random_futures_baseline(
                 for j in range(idx + 1, len(closes)):
                     atr_now = max(atrs[j], entry_fill * 0.005)
                     if side == "LONG":
-                        if not rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0110:
-                            stop_p = max(stop_p, entry_fill * 1.0020)
+                        if not rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0100:
+                            stop_p = max(stop_p, entry_fill * 1.0025)
                             rand_locked = True
                         elif rand_locked and j > idx + 1 and closes[j - 1] >= entry_fill * 1.0145:
                             stop_p = max(stop_p, entry_fill * 1.0060)
@@ -485,8 +485,8 @@ def simulate_random_futures_baseline(
                             exit_mid, exit_bar = closes[j], j
                             break
                     else:
-                        if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9890:
-                            stop_p = min(stop_p, entry_fill * 0.9980)
+                        if not rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9900:
+                            stop_p = min(stop_p, entry_fill * 0.9975)
                             rand_locked = True
                         elif rand_locked and j > idx + 1 and closes[j - 1] <= entry_fill * 0.9855:
                             stop_p = min(stop_p, entry_fill * 0.9940)
@@ -583,6 +583,23 @@ def main() -> None:
         print(f"  Random Monte Carlo p95 E/trade = {rand_p95:+.4f} USDT")
         g = gate.assess_backtest(m, random_p95=rand_p95, max_drawdown_pct=8.0)
         print(f"  Gate passed={g.passed} reasons={g.reasons}")
+
+        # Live 1-position global portfolio execution metrics (matching production rule: 'Una posicion a la vez')
+        sorted_trades = sorted(all_trades, key=lambda x: x["entry_time"])
+        live_trades = []
+        free_t = None
+        for tr in sorted_trades:
+            if free_t is None or tr["entry_time"] >= free_t:
+                live_trades.append(tr)
+                free_t = tr["exit_time"]
+        if live_trades:
+            sp_wins = [t for t in live_trades if t["net_pnl"] > 0]
+            sp_wr = len(sp_wins) / len(live_trades) * 100.0
+            sp_gw = sum(t["net_pnl"] for t in sp_wins)
+            sp_gl = sum(abs(t["net_pnl"]) for t in live_trades if t["net_pnl"] <= 0)
+            sp_pf = sp_gw / sp_gl if sp_gl > 0 else 999.0
+            sp_net = sum(t["net_pnl"] for t in live_trades)
+            print(f"  [Live Production 1-Pos Concurrency] N={len(live_trades)}  WR={sp_wr:5.1f}%  PF={sp_pf:4.2f}  Net={sp_net:+6.2f} USDT")
 
 
 if __name__ == "__main__":

@@ -143,6 +143,10 @@ class KronosQuantStrategy(BaseStrategy):
         if btc_trend == "BULLISH":
             tech_long_bps += btc_bias
             tech_short_bps -= 20.0
+            # Anti-Blowoff filter: do not chase alt breakouts if BTC just expanded >= +1.40% in 1h
+            btc_ret_1h = float(macro_lead.get("return_1h_pct", 0.0) or 0.0)
+            if btc_ret_1h >= 1.40:
+                tech_long_bps -= 30.0
         elif btc_trend == "BEARISH":
             tech_short_bps += abs(btc_bias)
             tech_long_bps -= 20.0
@@ -352,9 +356,9 @@ class KronosQuantStrategy(BaseStrategy):
                 if current_price >= lock_p:
                     self.log_decision(f"EXIT SHORT: Profit Lock @ {current_price:.4f} >= {lock_p:.4f}", print)
                     return True
-            # Tier-1 Breakeven Lock: if reached +1.10% gain, lock +0.20% (cover fees)
-            elif lowest_price > 0 and lowest_price <= entry_price * 0.9890:
-                lock_p = entry_price * 0.9980
+            # Tier-1 Breakeven Lock: if reached +1.00% gain, lock +0.25% (cover fees)
+            elif lowest_price > 0 and lowest_price <= entry_price * 0.9900:
+                lock_p = entry_price * 0.9975
                 if current_price >= lock_p:
                     self.log_decision(f"EXIT SHORT: Tier-1 Breakeven Lock @ {current_price:.4f} >= {lock_p:.4f}", print)
                     return True
@@ -388,9 +392,9 @@ class KronosQuantStrategy(BaseStrategy):
                 if current_price <= lock_p:
                     self.log_decision(f"EXIT LONG: Profit Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
                     return True
-            # Tier-1 Breakeven Lock: if reached +1.10% gain, lock +0.20% (cover fees)
-            elif highest_price >= entry_price * 1.0110:
-                lock_p = entry_price * 1.0020
+            # Tier-1 Breakeven Lock: if reached +1.00% gain, lock +0.25% (cover fees)
+            elif highest_price >= entry_price * 1.0100:
+                lock_p = entry_price * 1.0025
                 if current_price <= lock_p:
                     self.log_decision(f"EXIT LONG: Tier-1 Breakeven Lock @ {current_price:.4f} <= {lock_p:.4f}", print)
                     return True

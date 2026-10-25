@@ -77,22 +77,22 @@ def test_kronos_quant_scratch_and_vertical_exits():
         "lowest_price": 99.95,
         "bars_held": 3,
     }
-    # Case 4: LONG Tier-1 Breakeven Lock (touched +1.15%, pulled back to +0.15% <= +0.20% lock)
+    # Case 4: LONG Tier-1 Breakeven Lock (touched +1.05%, pulled back to +0.20% <= +0.25% lock)
     state_long_tier1 = {
         "position_side": "LONG",
         "entry_price": 100.0,
-        "current_price": 100.15,
-        "highest_price": 101.15,
+        "current_price": 100.20,
+        "highest_price": 101.05,
         "bars_held": 1,
     }
     assert strategy.check_sell_signal({"atr": 1.0}, settings, state_long_tier1) is True
 
-    # Case 5: SHORT Tier-1 Breakeven Lock (touched 98.85 = +1.15% gain, pulled back to 99.85 >= 99.80 lock)
+    # Case 5: SHORT Tier-1 Breakeven Lock (touched 98.95 = +1.05% gain, pulled back to 99.80 >= 99.75 lock)
     state_short_tier1 = {
         "position_side": "SHORT",
         "entry_price": 100.0,
-        "current_price": 99.85,
-        "lowest_price": 98.85,
+        "current_price": 99.80,
+        "lowest_price": 98.95,
         "bars_held": 1,
     }
     assert strategy.check_sell_signal({"atr": 1.0}, settings, state_short_tier1) is True
