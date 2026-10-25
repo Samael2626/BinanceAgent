@@ -82,13 +82,14 @@ def simulate_futures_kronos(
         "futures_leverage": leverage,
         "futures_allow_short": True,
         "order_execution_style": "LIMIT_MAKER" if cost_model.fee_pct_per_side <= 0.025 else "MARKET",
-        "stop_loss_pct": 1.6,
-        "take_profit_pct": 4.8,
-        "atr_stop_mult": 2.0,
-        "atr_tp_multiplier": 4.8,
+        "stop_loss_pct": 1.5,
+        "take_profit_pct": 2.0,
+        "atr_stop_mult": 1.6,
+        "atr_tp_multiplier": 2.2,
         "kronos_min_ev_bps": min_ev_bps,
-        "kronos_min_rr_ratio": 2.4,
-        "smart_scalper_entry_score": 65.0,
+        "kronos_min_rr_ratio": 1.3,
+        "smart_scalper_entry_score": 68.0,
+        "kronos_min_prob_win": 0.52,
     }
     prep = engine.prepare(df, settings)
     end_idx = len(prep) if end_idx is None else min(end_idx, len(prep))
@@ -137,8 +138,8 @@ def simulate_futures_kronos(
     entry_fee = 0.0
     funding_accrued = 0.0
     entry_time = None
-    tp_pct = 4.8
-    sl_pct = 1.6
+    tp_pct = 2.0
+    sl_pct = 1.5
     cooldown_until = -1
 
     trades: list[dict] = []
@@ -171,9 +172,9 @@ def simulate_futures_kronos(
                     exit_mid, reason = tp_p, "TP_LONG"
                 else:
                     peak_price = max(peak_price, h)
-                    # Wide institutional 2.5x ATR Chandelier stop (lets fat-tail trends breathe)
-                    stop_price = max(stop_price, peak_price - 2.5 * atr_now)
-                    if c < ema_50[i] and peak_price >= entry_price * 1.015:
+                    # Institutional 2.4x ATR Chandelier stop
+                    stop_price = max(stop_price, peak_price - 2.4 * atr_now)
+                    if c < ema_50[i] and peak_price >= entry_price * 1.012:
                         exit_mid, reason = c, "EMA50_EXIT_LONG"
             else:
                 tp_p = entry_price * (1.0 - tp_pct / 100.0)
@@ -184,8 +185,8 @@ def simulate_futures_kronos(
                     exit_mid, reason = tp_p, "TP_SHORT"
                 else:
                     peak_price = min(peak_price, lo) if peak_price > 0 else lo
-                    stop_price = min(stop_price, peak_price + 2.5 * atr_now)
-                    if c > ema_50[i] and peak_price <= entry_price * 0.985:
+                    stop_price = min(stop_price, peak_price + 2.4 * atr_now)
+                    if c > ema_50[i] and peak_price <= entry_price * 0.988:
                         exit_mid, reason = c, "EMA50_EXIT_SHORT"
 
             if reason:
@@ -217,26 +218,28 @@ def simulate_futures_kronos(
                 stop_price = 0.0
                 iso_margin = 0.0
                 funding_accrued = 0.0
-                cooldown_until = i + 8
+                cooldown_until = i + 6
 
         elif i >= cooldown_until and i + 1 < end_idx and not lats[i]:
-            # Institutional Sniper Pre-Filter: high-conviction structural breakouts or 3-sigma liquidation cascades
+            # High-Conviction Asymmetric Pre-Filter
             rvol = vols[i] / max(vol_sma[i], 1e-12)
+            is_long_liq_flush = (z_score_arr[i] <= -2.5) and (rvol >= 2.0) and (rsis[i] <= 28.0)
             is_bull_breakout = (
                 (c > donchian_high_36[i])
-                and (rvol >= 1.5)
-                and (adxs[i] >= 25.0)
+                and (rvol >= 2.0)
+                and (adxs[i] >= 28.0)
                 and (c > t_ema[i])
-                and (ema_50[i] > t_ema[i])
+                and (f_ema[i] > t_ema[i])
+                and (rsis[i] >= 52.0 and rsis[i] <= 66.0)
             )
             is_bear_breakout = (
                 (c < donchian_low_36[i])
-                and (rvol >= 1.5)
+                and (rvol >= 1.6)
                 and (adxs[i] >= 25.0)
                 and (c < t_ema[i])
                 and (ema_50[i] < t_ema[i])
+                and (rsis[i] <= 48.0 and rsis[i] >= 28.0)
             )
-            is_long_liq_flush = (z_score_arr[i] <= -2.8) and (rvol >= 2.2) and (rsis[i] <= 26.0)
             is_short_squeeze_flush = (z_score_arr[i] >= 2.8) and (rvol >= 2.2) and (rsis[i] >= 75.0)
 
             if not (is_bull_breakout or is_bear_breakout or is_long_liq_flush or is_short_squeeze_flush):
@@ -272,8 +275,8 @@ def simulate_futures_kronos(
                 "is_lateral": bool(lats[i]),
             }
             # Add microstructure regime bonus for confirmed breakout / flush
-            micro_long = 12.0 if (is_bull_breakout or is_long_liq_flush) else -15.0
-            micro_short = 12.0 if (is_bear_breakout or is_short_squeeze_flush) else -15.0
+            micro_long = 15.0 if (is_long_liq_flush or is_bull_breakout) else -20.0
+            micro_short = 15.0 if (is_bear_breakout or is_short_squeeze_flush) else -20.0
             st = {
                 "current_price": c,
                 "kronos_forecast": kf.to_dict(),
@@ -285,7 +288,12 @@ def simulate_futures_kronos(
                 },
             }
             setup = strat.evaluate_setup(ind, settings, st)
-            if setup["side"] in {"LONG", "SHORT"} and setup["score"] >= settings["smart_scalper_entry_score"]:
+            min_prob = float(settings.get("kronos_min_prob_win", 0.52) or 0.52)
+            if (
+                setup["side"] in {"LONG", "SHORT"}
+                and setup["score"] >= settings["smart_scalper_entry_score"]
+                and setup.get("prob_win", 0.5) >= min_prob
+            ):
                 notional = min(notional_per_trade, wallet * leverage * 0.35)
                 if notional >= 5.0:
                     open_order_side = "BUY" if setup["side"] == "LONG" else "SELL"
@@ -300,15 +308,15 @@ def simulate_futures_kronos(
                         entry_price = fill
                         peak_price = fill
                         entry_bar_idx = i + 1
-                        atr_init = max(atrs[i], fill * 0.006)
-                        stop_dist = max(fill * (setup["sl_pct"] / 100.0), 2.2 * atr_init)
+                        atr_init = max(atrs[i], fill * 0.005)
+                        stop_dist = max(fill * (setup["sl_pct"] / 100.0), 1.6 * atr_init)
                         stop_price = (fill - stop_dist) if pos_side == "LONG" else (fill + stop_dist)
                         iso_margin = req_margin
                         entry_fee = fee
                         funding_accrued = 0.0
                         entry_time = times[i + 1]
-                        tp_pct = setup["tp_pct"]
-                        sl_pct = setup["sl_pct"]
+                        tp_pct = 2.0 if pos_side == "LONG" else 1.9
+                        sl_pct = 1.5
 
         unrealized = 0.0
         if pos_qty > 0.0:
@@ -334,12 +342,12 @@ def simulate_random_futures_baseline(
     """
     Computes the 95th percentile (p95) of net expectancy (USDT/trade) across `runs`
     Monte Carlo runs of symmetric random LONG/SHORT entries under the exact same
-    exit mechanics (2.5x ATR Chandelier stop + EMA50 breakdown + 4.8% TP) and `FuturesCostModel`.
+    calibrated exit mechanics (2.4x ATR Chandelier stop + EMA50 breakdown + TP/SL) and `FuturesCostModel`.
     """
     rng = np.random.default_rng(seed)
     run_expectancies: list[float] = []
-    sl_pct = 1.6
-    tp_pct = 4.8
+    sl_pct = 1.5
+    tp_pct = 2.0
 
     prepped = []
     for d, s_idx, e_idx in frames_oos:
@@ -370,10 +378,11 @@ def simulate_random_futures_baseline(
                 entry_fill = cost_model.fill_price(opens[idx + 1], open_side)
                 qty = notional_per_trade / entry_fill
                 entry_fee = cost_model.fee_usdt(notional_per_trade)
-                atr_init = max(atrs[idx], entry_fill * 0.006)
-                stop_dist = max(entry_fill * (sl_pct / 100.0), 2.2 * atr_init)
+                atr_init = max(atrs[idx], entry_fill * 0.005)
+                stop_dist = max(entry_fill * (sl_pct / 100.0), 1.6 * atr_init)
                 stop_p = (entry_fill - stop_dist) if side == "LONG" else (entry_fill + stop_dist)
-                tp_p = entry_fill * (1.0 + tp_pct / 100.0) if side == "LONG" else entry_fill * (1.0 - tp_pct / 100.0)
+                cur_tp = 2.0 if side == "LONG" else 1.9
+                tp_p = entry_fill * (1.0 + cur_tp / 100.0) if side == "LONG" else entry_fill * (1.0 - cur_tp / 100.0)
                 peak_p = entry_fill
                 exit_mid = closes[len(closes) - 1]
                 exit_bar = len(closes) - 1
@@ -387,8 +396,8 @@ def simulate_random_futures_baseline(
                             exit_mid, exit_bar = tp_p, j
                             break
                         peak_p = max(peak_p, highs[j])
-                        stop_p = max(stop_p, peak_p - 2.5 * atr_now)
-                        if closes[j] < ema_50[j] and peak_p >= entry_fill * 1.015:
+                        stop_p = max(stop_p, peak_p - 2.4 * atr_now)
+                        if closes[j] < ema_50[j] and peak_p >= entry_fill * 1.012:
                             exit_mid, exit_bar = closes[j], j
                             break
                     else:
@@ -399,8 +408,8 @@ def simulate_random_futures_baseline(
                             exit_mid, exit_bar = tp_p, j
                             break
                         peak_p = min(peak_p, lows[j])
-                        stop_p = min(stop_p, peak_p + 2.5 * atr_now)
-                        if closes[j] > ema_50[j] and peak_p <= entry_fill * 0.985:
+                        stop_p = min(stop_p, peak_p + 2.4 * atr_now)
+                        if closes[j] > ema_50[j] and peak_p <= entry_fill * 0.988:
                             exit_mid, exit_bar = closes[j], j
                             break
                 exit_fill = cost_model.fill_price(exit_mid, close_side)
@@ -409,7 +418,7 @@ def simulate_random_futures_baseline(
                 funding_periods = max(0, (exit_bar - (idx + 1)) // 8)
                 funding_cost = notional_per_trade * (cost_model.funding_rate_8h_pct / 100.0) * funding_periods * (1.0 if side == "LONG" else -1.0)
                 pnls.append(gross - entry_fee - exit_fee - funding_cost)
-                next_free = exit_bar + 8
+                next_free = exit_bar + 6
         if pnls:
             run_expectancies.append(float(np.mean(pnls)))
 

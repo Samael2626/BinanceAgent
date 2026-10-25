@@ -25,22 +25,23 @@ class KronosQuantStrategy(BaseStrategy):
         return ["rsi", "macd_hist", "macd_signal", "trend_ema", "fast_ema", "atr", "adx"]
 
     @staticmethod
-    def _resolve_barriers_pct(indicators: Dict[str, Any], settings: Dict[str, Any], current_price: float) -> tuple[float, float]:
+    def _resolve_barriers_pct(indicators: Dict[str, Any], settings: Dict[str, Any], current_price: float, side: str = "LONG") -> tuple[float, float]:
         """
         Computes volatility-adapted Stop Loss (%) and Take Profit (%) enforcing
-        a positive asymmetric reward-to-risk ratio (default >= 1.8x).
+        a calibrated reward-to-risk ratio (default >= 1.3x) tuned for high Win Rate.
         """
-        base_sl = max(float(settings.get("stop_loss_pct", 1.6) or 1.6), 0.4)
-        base_tp = max(float(settings.get("take_profit_pct", 4.8) or 4.8), 0.8)
-        min_rr = max(float(settings.get("kronos_min_rr_ratio", 2.4) or 2.4), 1.2)
+        default_tp = 1.9 if str(side).upper() == "SHORT" else 2.0
+        base_sl = max(float(settings.get("stop_loss_pct", 1.5) or 1.5), 0.4)
+        base_tp = max(float(settings.get("take_profit_pct", default_tp) or default_tp), 0.8)
+        min_rr = max(float(settings.get("kronos_min_rr_ratio", 1.3) or 1.3), 1.0)
 
         atr = float(indicators.get("atr", 0.0) or 0.0)
         if atr > 0 and current_price > 0:
             atr_pct = (atr / current_price) * 100.0
-            sl_mult = max(float(settings.get("atr_stop_mult", 2.0) or 2.0), 0.5)
+            sl_mult = max(float(settings.get("atr_stop_mult", 1.6) or 1.6), 0.5)
             tp_mult = max(float(settings.get("atr_tp_multiplier", sl_mult * min_rr) or (sl_mult * min_rr)), sl_mult * min_rr)
-            sl_pct = max(base_sl * 0.6, min(3.5, atr_pct * sl_mult))
-            tp_pct = max(sl_pct * min_rr, min(8.0, atr_pct * tp_mult))
+            sl_pct = max(base_sl * 0.7, min(3.0, atr_pct * sl_mult))
+            tp_pct = max(sl_pct * min_rr, min(5.0, atr_pct * tp_mult))
         else:
             sl_pct = base_sl
             tp_pct = max(base_tp, sl_pct * min_rr)
@@ -84,9 +85,12 @@ class KronosQuantStrategy(BaseStrategy):
         kronos = state.get("kronos_forecast") or indicators.get("kronos_forecast") or {}
         micro = state.get("microstructure") or indicators.get("microstructure") or {}
 
-        tp_pct, sl_pct = self._resolve_barriers_pct(indicators, settings, current_price)
-        tp_bps = tp_pct * 100.0
-        sl_bps = sl_pct * 100.0
+        tp_long_pct, sl_long_pct = self._resolve_barriers_pct(indicators, settings, current_price, "LONG")
+        tp_short_pct, sl_short_pct = self._resolve_barriers_pct(indicators, settings, current_price, "SHORT")
+        tp_long_bps = tp_long_pct * 100.0
+        sl_long_bps = sl_long_pct * 100.0
+        tp_short_bps = tp_short_pct * 100.0
+        sl_short_bps = sl_short_pct * 100.0
         cost_bps = self._round_trip_cost_bps(settings)
         min_ev_bps = float(settings.get("kronos_min_ev_bps", 12.0) or 12.0)
 
@@ -133,16 +137,16 @@ class KronosQuantStrategy(BaseStrategy):
 
         # Expected Value (bps) net of round-trip costs
         ev_long_bps = (
-            prob_up * tp_bps
-            - (1.0 - prob_up) * sl_bps
+            prob_up * tp_long_bps
+            - (1.0 - prob_up) * sl_long_bps
             - cost_bps
             - spread_penalty_bps
             + long_micro_adj
             + tech_long_bps
         )
         ev_short_bps = (
-            prob_down * tp_bps
-            - (1.0 - prob_down) * sl_bps
+            prob_down * tp_short_bps
+            - (1.0 - prob_down) * sl_short_bps
             - cost_bps
             - spread_penalty_bps
             + short_micro_adj
@@ -166,18 +170,32 @@ class KronosQuantStrategy(BaseStrategy):
         chosen_side = "NONE"
         chosen_ev = ev_long_bps
         prob_win = prob_up
+        tp_pct = tp_long_pct
+        sl_pct = sl_long_pct
 
         if allow_short and ev_short_bps > ev_long_bps and ev_short_bps >= min_ev_bps:
             chosen_side = "SHORT"
             chosen_ev = ev_short_bps
             prob_win = prob_down
+            tp_pct = tp_short_pct
+            sl_pct = sl_short_pct
         elif ev_long_bps >= min_ev_bps:
             chosen_side = "LONG"
             chosen_ev = ev_long_bps
             prob_win = prob_up
+            tp_pct = tp_long_pct
+            sl_pct = sl_long_pct
         elif allow_short and ev_short_bps > ev_long_bps:
             chosen_ev = ev_short_bps
             prob_win = prob_down
+            tp_pct = tp_short_pct
+            sl_pct = sl_short_pct
+
+        # High precision gate: require minimum directional probability (default >= 0.52)
+        min_prob_win = float(settings.get("kronos_min_prob_win", 0.52) or 0.52)
+        if chosen_side != "NONE" and prob_win < min_prob_win:
+            chosen_side = "NONE"
+            chosen_ev = min(chosen_ev, min_ev_bps - 1.0)
 
         # Map net EV (bps) into the 0..100 score scale used by BinanceBot & Scanner
         # At chosen_ev == min_ev_bps -> score = 65.0; +35 bps above threshold -> 100.0
@@ -252,7 +270,7 @@ class KronosQuantStrategy(BaseStrategy):
         if entry_price <= 0 or current_price <= 0:
             return False
 
-        tp_pct, sl_pct = self._resolve_barriers_pct(indicators, settings, entry_price)
+        tp_pct, sl_pct = self._resolve_barriers_pct(indicators, settings, entry_price, position_side)
         local_settings = {**settings, "stop_loss_pct": sl_pct, "take_profit_pct": tp_pct}
 
         if position_side == "SHORT":
