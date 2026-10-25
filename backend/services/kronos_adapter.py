@@ -323,16 +323,23 @@ class KronosAdapter:
                 # Attempt loading official shiyu-coder/Kronos classes if installed in environment
                 from model import Kronos, KronosTokenizer, KronosPredictor  # type: ignore
                 import torch
+                from pathlib import Path
+
+                # Prioritize local checkpoint paths on D: drive if available
+                local_model_dir = Path("D:/models/kronos_small")
+                local_tok_dir = Path("D:/models/kronos_tokenizer_base")
+                model_source = str(local_model_dir) if local_model_dir.exists() and (local_model_dir / "config.json").exists() else self.model_id
+                tokenizer_source = str(local_tok_dir) if local_tok_dir.exists() and (local_tok_dir / "config.json").exists() else spec["tokenizer"]
 
                 dev = self._resolve_device()
-                tokenizer = KronosTokenizer.from_pretrained(spec["tokenizer"])
-                model = Kronos.from_pretrained(self.model_id)
+                tokenizer = KronosTokenizer.from_pretrained(tokenizer_source)
+                model = Kronos.from_pretrained(model_source)
                 if self.use_fp16 and dev.startswith("cuda"):
                     model = model.half()
                 self._predictor = KronosPredictor(
                     model, tokenizer, device=dev, max_context=int(spec["max_context"])
                 )
-                logger.info("Loaded Kronos neural model=%s on device=%s", self.model_id, dev)
+                logger.info("Loaded Kronos neural model=%s (source=%s) on device=%s", self.model_id, model_source, dev)
                 return self._predictor
             except Exception as exc:
                 logger.debug(

@@ -25,6 +25,8 @@ build/
 .vscode/
 .idea/
 
-# Binaries
+# Binaries and model weights
 *.exe
 *.bin
+*.safetensors
+weights/
