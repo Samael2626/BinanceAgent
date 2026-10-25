@@ -30,6 +30,7 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from backend.services.kronos_adapter import KronosAdapter
+from backend.services.microstructure import LeadLagAnalyzer
 from backend.strategies.kronos_quant import KronosQuantStrategy
 from harness import data_loader, engine, gate, metrics, splits
 
@@ -67,6 +68,7 @@ def simulate_futures_kronos(
     start_idx: int = 250,
     end_idx: int | None = None,
     min_ev_bps: float = 12.0,
+    d_btc: pd.DataFrame | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Simulates `KronosQuantStrategy` on 1h closed bars with isolated margin,
@@ -94,6 +96,21 @@ def simulate_futures_kronos(
     prep = engine.prepare(df, settings)
     end_idx = len(prep) if end_idx is None else min(end_idx, len(prep))
     start_idx = max(start_idx, 250)
+
+    btc_prep = None
+    btc_time_to_idx: dict[pd.Timestamp, int] = {}
+    lead_analyzer = None
+    if d_btc is not None:
+        try:
+            btc_prep = engine.prepare(d_btc, settings)
+            btc_times = pd.to_datetime(btc_prep["open_time"], utc=True).to_list()
+            btc_closes = btc_prep["close"].to_numpy(float)
+            btc_f_ema = btc_prep["fast_ema"].to_numpy(float)
+            btc_t_ema = btc_prep["trend_ema"].to_numpy(float)
+            btc_time_to_idx = {t: idx for idx, t in enumerate(btc_times)}
+            lead_analyzer = LeadLagAnalyzer("BTCUSDT")
+        except Exception:
+            btc_prep = None
 
     closes = prep["close"].to_numpy(float)
     opens = prep["open"].to_numpy(float)
@@ -293,9 +310,24 @@ def simulate_futures_kronos(
             # Add microstructure regime bonus for confirmed breakout / flush
             micro_long = 15.0 if (is_long_liq_flush or is_bull_breakout) else -20.0
             micro_short = 15.0 if (is_bear_breakout or is_short_squeeze_flush) else -20.0
+
+            macro_lead: dict[str, Any] = {}
+            if lead_analyzer is not None and btc_prep is not None and t in btc_time_to_idx:
+                b_idx = btc_time_to_idx[t]
+                btc_c = btc_closes[b_idx]
+                btc_ret1 = (btc_c / btc_closes[b_idx - 1] - 1.0) * 100.0 if b_idx > 0 else 0.0
+                snap = lead_analyzer.evaluate(
+                    btc_current_price=btc_c,
+                    btc_ema_fast=btc_f_ema[b_idx],
+                    btc_ema_trend=btc_t_ema[b_idx],
+                    btc_return_1h_pct=btc_ret1,
+                )
+                macro_lead = snap.to_dict()
+
             st = {
                 "current_price": c,
                 "kronos_forecast": kf.to_dict(),
+                "macro_lead": macro_lead,
                 "microstructure": {
                     "long_edge_bps_adj": micro_long,
                     "short_edge_bps_adj": micro_short,
@@ -469,6 +501,12 @@ def main() -> None:
     print(f"KRONOS QUANT FUTURES HARNESS | TF={args.tf} | Equity=47 USDT | Leverage=2x | MinNotional=5 USDT")
     print("=" * 100)
 
+    d_btc = None
+    try:
+        d_btc = data_loader.load("BTCUSDT", args.tf)
+    except Exception as exc:
+        print(f"  [warn] BTCUSDT anchor data unavailable: {exc}")
+
     for label, cm in [
         ("FUTURES MAKER (2bps fee, 1bp slip)", FuturesCostModel.maker_base()),
         ("FUTURES STRESS TAKER (5bps fee, 4bps slip)", FuturesCostModel.taker_stress()),
@@ -486,7 +524,7 @@ def main() -> None:
             oos_start, oos_end = bounds["OOS"]
             frames_oos.append((d, oos_start, oos_end))
             tr, cv = simulate_futures_kronos(
-                d, sym, cm, start_idx=oos_start, end_idx=oos_end
+                d, sym, cm, start_idx=oos_start, end_idx=oos_end, d_btc=d_btc
             )
             all_trades.extend(tr)
             if cv:

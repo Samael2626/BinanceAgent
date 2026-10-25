@@ -309,3 +309,117 @@ class MicrostructureAnalyzer:
             long_forced_close_usdt=round(l_fc, 2),
             short_forced_close_usdt=round(s_fc, 2),
         )
+
+
+def compute_order_flow_imbalance(
+    prev_book: dict | None,
+    curr_book: dict | None,
+) -> float:
+    """
+    Computes Cont-Kukanov-Stoikov (2014) Order Flow Imbalance (OFI).
+    Measures net changes in queue sizes at best bid/ask and top levels.
+    Returns normalized OFI in [-1.0, +1.0].
+    """
+    if not prev_book or not curr_book:
+        return 0.0
+
+    p_bids = prev_book.get("bids") or []
+    p_asks = prev_book.get("asks") or []
+    c_bids = curr_book.get("bids") or []
+    c_asks = curr_book.get("asks") or []
+
+    if not p_bids or not p_asks or not c_bids or not c_asks:
+        return 0.0
+
+    try:
+        p_bid_p, p_bid_q = float(p_bids[0][0]), float(p_bids[0][1])
+        p_ask_p, p_ask_q = float(p_asks[0][0]), float(p_asks[0][1])
+        c_bid_p, c_bid_q = float(c_bids[0][0]), float(c_bids[0][1])
+        c_ask_p, c_ask_q = float(c_asks[0][0]), float(c_asks[0][1])
+    except (ValueError, TypeError, IndexError):
+        return 0.0
+
+    if c_bid_p > p_bid_p:
+        delta_bid = c_bid_q
+    elif c_bid_p == p_bid_p:
+        delta_bid = c_bid_q - p_bid_q
+    else:
+        delta_bid = -p_bid_q
+
+    if c_ask_p < p_ask_p:
+        delta_ask = c_ask_q
+    elif c_ask_p == p_ask_p:
+        delta_ask = c_ask_q - p_ask_q
+    else:
+        delta_ask = -p_ask_q
+
+    raw_ofi = delta_bid - delta_ask
+    norm_denom = max(c_bid_q + c_ask_q, 1e-6)
+    return max(-1.0, min(1.0, raw_ofi / norm_denom))
+
+
+@dataclass(frozen=True)
+class LeadLagSnapshot:
+    anchor_symbol: str          # Usually "BTCUSDT"
+    trend: str                  # "BULLISH" | "BEARISH" | "NEUTRAL"
+    return_1h_pct: float
+    bias_bps: float             # Positive = bullish anchor push, Negative = bearish anchor drag
+    confluence_score: float     # 0.0 to 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class LeadLagAnalyzer:
+    """
+    Tracks Bitcoin (BTCUSDT) macro directional momentum as the anchor asset
+    to guide altcoin execution decisions and eliminate false breakouts.
+    """
+
+    def __init__(self, anchor_symbol: str = "BTCUSDT"):
+        self.anchor_symbol = anchor_symbol.upper()
+
+    def evaluate(
+        self,
+        btc_current_price: float,
+        btc_ema_fast: float,
+        btc_ema_trend: float,
+        btc_return_1h_pct: float = 0.0,
+    ) -> LeadLagSnapshot:
+        if btc_current_price <= 0:
+            return LeadLagSnapshot(
+                anchor_symbol=self.anchor_symbol,
+                trend="NEUTRAL",
+                return_1h_pct=0.0,
+                bias_bps=0.0,
+                confluence_score=0.5,
+            )
+
+        is_bullish = (
+            btc_current_price >= btc_ema_trend
+            and btc_ema_fast >= btc_ema_trend
+            and btc_return_1h_pct >= -0.25
+        )
+        is_bearish = (
+            btc_current_price <= btc_ema_trend
+            and btc_ema_fast <= btc_ema_trend
+            and btc_return_1h_pct <= 0.25
+        )
+
+        trend = "BULLISH" if is_bullish else ("BEARISH" if is_bearish else "NEUTRAL")
+
+        bias_bps = 0.0
+        if trend == "BULLISH":
+            bias_bps = min(18.0, max(6.0, btc_return_1h_pct * 8.0 + 8.0))
+        elif trend == "BEARISH":
+            bias_bps = max(-18.0, min(-6.0, btc_return_1h_pct * 8.0 - 8.0))
+
+        confluence_score = 0.5 + (bias_bps / 36.0)
+
+        return LeadLagSnapshot(
+            anchor_symbol=self.anchor_symbol,
+            trend=trend,
+            return_1h_pct=round(btc_return_1h_pct, 3),
+            bias_bps=round(bias_bps, 2),
+            confluence_score=round(confluence_score, 3),
+        )

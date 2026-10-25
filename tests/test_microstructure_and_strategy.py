@@ -121,7 +121,88 @@ def test_kronos_quant_meta_labeling_long_short_and_gate():
     assert strat.check_buy_signal(indicators, base_settings, state_noise) is False
 
 
+def test_order_flow_imbalance_calculation():
+    from backend.services.microstructure import compute_order_flow_imbalance
+
+    # Test 1: Bid price rises (aggressive buying) -> positive OFI
+    prev_book = {"bids": [["100.00", "10.0"]], "asks": [["100.50", "10.0"]]}
+    curr_book = {"bids": [["100.20", "15.0"]], "asks": [["100.50", "10.0"]]}
+    ofi = compute_order_flow_imbalance(prev_book, curr_book)
+    assert ofi > 0.0
+
+    # Test 2: Ask price falls (aggressive selling) -> negative OFI
+    curr_book_bear = {"bids": [["100.00", "10.0"]], "asks": [["100.30", "12.0"]]}
+    ofi_bear = compute_order_flow_imbalance(prev_book, curr_book_bear)
+    assert ofi_bear < 0.0
+
+
+def test_lead_lag_analyzer_and_macro_bias():
+    from backend.services.microstructure import LeadLagAnalyzer
+
+    analyzer = LeadLagAnalyzer("BTCUSDT")
+
+    # Bullish anchor push
+    bull_snap = analyzer.evaluate(
+        btc_current_price=68500.0,
+        btc_ema_fast=68200.0,
+        btc_ema_trend=67000.0,
+        btc_return_1h_pct=1.2,
+    )
+    assert bull_snap.trend == "BULLISH"
+    assert bull_snap.bias_bps >= 6.0
+    assert bull_snap.confluence_score > 0.5
+
+    # Bearish anchor drag
+    bear_snap = analyzer.evaluate(
+        btc_current_price=64000.0,
+        btc_ema_fast=64500.0,
+        btc_ema_trend=66000.0,
+        btc_return_1h_pct=-1.5,
+    )
+    assert bear_snap.trend == "BEARISH"
+    assert bear_snap.bias_bps <= -6.0
+    assert bear_snap.confluence_score < 0.5
+
+    # Test integration into KronosQuantStrategy
+    strat = KronosQuantStrategy()
+    base_settings = {
+        "market_type": "FUTURES",
+        "futures_allow_short": True,
+        "stop_loss_pct": 1.5,
+        "take_profit_pct": 2.0,
+        "kronos_min_ev_bps": 12.0,
+        "smart_scalper_entry_score": 65.0,
+    }
+    ind = {
+        "rsi": 55.0,
+        "macd_hist": 0.1,
+        "trend_ema": 100.0,
+        "fast_ema": 101.0,
+        "adx": 30.0,
+        "atr": 1.0,
+        "is_lateral": False,
+    }
+    st_bull = {
+        "current_price": 102.0,
+        "kronos_forecast": {
+            "prob_up_net": 0.56,
+            "prob_down_net": 0.30,
+            "expected_return_pct": 0.8,
+            "volatility_amp": 1.0,
+            "rank_score": 70.0,
+        },
+        "macro_lead": bull_snap.to_dict(),
+        "microstructure": {"long_edge_bps_adj": 5.0, "short_edge_bps_adj": -5.0, "oi_regime": "LONG_BUILDUP"},
+    }
+    eval_bull = strat.evaluate_setup(ind, base_settings, st_bull)
+    assert eval_bull["side"] == "LONG"
+    assert any("Lead=BULLISH" in r for r in eval_bull["reasons"])
+
+
 if __name__ == "__main__":
     test_microstructure_obi_and_regimes()
     test_kronos_quant_meta_labeling_long_short_and_gate()
-    print("microstructure and strategy tests ok")
+    test_order_flow_imbalance_calculation()
+    test_lead_lag_analyzer_and_macro_bias()
+    print("all microstructure and lead-lag tests passed!")
+

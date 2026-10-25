@@ -135,6 +135,18 @@ class KronosQuantStrategy(BaseStrategy):
             tech_short_bps -= 12.0  # Do not chase extreme oversold on SHORT
             tech_long_bps += 4.0
 
+        macro_lead = state.get("macro_lead") or indicators.get("macro_lead") or {}
+        btc_trend = str(macro_lead.get("trend", "NEUTRAL") or "NEUTRAL").upper()
+        btc_bias = float(macro_lead.get("bias_bps", 0.0) or 0.0)
+
+        # Institutional Cross-Asset Lead-Lag Filter (BTC anchor alignment)
+        if btc_trend == "BULLISH":
+            tech_long_bps += btc_bias
+            tech_short_bps -= 20.0
+        elif btc_trend == "BEARISH":
+            tech_short_bps += abs(btc_bias)
+            tech_long_bps -= 20.0
+
         # Expected Value (bps) net of round-trip costs
         ev_long_bps = (
             prob_up * tp_long_bps
@@ -211,6 +223,8 @@ class KronosQuantStrategy(BaseStrategy):
             f"cost={cost_bps:.1f}bps",
             f"OI={oi_regime}",
         ]
+        if btc_trend != "NEUTRAL":
+            reasons.append(f"Lead={btc_trend}({btc_bias:+.1f}bps)")
         return {
             "side": chosen_side,
             "score": score,
