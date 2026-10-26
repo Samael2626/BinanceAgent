@@ -61,6 +61,15 @@ def calculate_position_quote_size(
     return floor(quote_size * 100) / 100
 
 
+def calculate_native_futures_stop(
+    fill_price: float, atr: float, stop_loss_pct: float, atr_stop_mult: float, side: str,
+) -> float:
+    if fill_price <= 0 or side not in {"LONG", "SHORT"}:
+        raise ValueError("invalid Futures stop inputs")
+    distance = max(max(atr, 0.0) * atr_stop_mult, fill_price * stop_loss_pct / 100.0)
+    return fill_price - distance if side == "LONG" else fill_price + distance
+
+
 def calculate_futures_position_size(
     equity: float,
     current_price: float,

@@ -74,6 +74,7 @@ def simulate_futures_kronos(
     min_ev_bps: float = 12.0,
     d_btc: pd.DataFrame | None = None,
 ) -> tuple[list[dict], list[dict]]:
+    raise RuntimeError("estudio Futures legado invalidado: cache Spot y cartera proxy")
     """
     Simulates `KronosQuantStrategy` on 1h closed bars with isolated margin,
     worst-case intrabar exit ordering (SL before TP), and 8h funding settlements.
@@ -406,6 +407,7 @@ def simulate_random_futures_baseline(
     seed: int = 42,
     notional_per_trade: float = 20.0,
 ) -> float:
+    raise RuntimeError("baseline Futures legado invalidado: cartera y funding no equivalentes")
     """
     Computes the 95th percentile (p95) of net expectancy (USDT/trade) across `runs`
     Monte Carlo runs of symmetric random LONG/SHORT entries under the exact same
@@ -525,6 +527,10 @@ def simulate_random_futures_baseline(
 
 
 def main() -> None:
+    raise SystemExit(
+        "GATE ROJO: estudio legado usa cache Spot, billeteras por simbolo y funding supuesto. "
+        "No valida Kronos Futures REAL."
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--symbols",

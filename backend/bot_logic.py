@@ -26,6 +26,7 @@ from .telegram_notifier import TelegramNotifier
 from .indicators import calculate_indicators
 from .risk import (
     calculate_futures_position_size,
+    calculate_native_futures_stop,
     calculate_position_quote_size,
     next_halt_timestamp,
     sanitize_timeframe,
@@ -44,7 +45,7 @@ from .scanner import (
 from .strategies.rsi_rebound import RSIReboundStrategy
 from .strategies.breakout_volume import BreakoutVolumeStrategy
 from .strategies.smart_scalper import SmartScalperStrategy
-from .strategies.kronos_quant import KronosQuantStrategy
+from .strategies.kronos_quant import KronosQuantStrategy, KRONOS_HORIZON_BARS, KRONOS_SAMPLE_COUNT
 
 from .predictive_modules import PredictiveEngine
 from .services.kronos_adapter import DEFAULT_KRONOS_MODEL, KronosAdapter
@@ -165,8 +166,8 @@ class BinanceBot:
         self.futures_allow_short = self.db.get_setting("futures_allow_short", "True", user_id=user_id) == "True"
         self.order_execution_style = str(self.db.get_setting("order_execution_style", "LIMIT_MAKER", user_id=user_id) or "LIMIT_MAKER").upper()
         self.kronos_model_id = str(self.db.get_setting("kronos_model_id", DEFAULT_KRONOS_MODEL, user_id=user_id) or DEFAULT_KRONOS_MODEL)
-        self.kronos_horizon_bars = int(self.db.get_setting("kronos_horizon_bars", 12, user_id=user_id) or 12)
-        self.kronos_sample_count = int(self.db.get_setting("kronos_sample_count", 20, user_id=user_id) or 20)
+        self.kronos_horizon_bars = int(self.db.get_setting("kronos_horizon_bars", KRONOS_HORIZON_BARS, user_id=user_id) or KRONOS_HORIZON_BARS)
+        self.kronos_sample_count = int(self.db.get_setting("kronos_sample_count", KRONOS_SAMPLE_COUNT, user_id=user_id) or KRONOS_SAMPLE_COUNT)
         self.kronos_min_ev_bps = float(self.db.get_setting("kronos_min_ev_bps", 12.0, user_id=user_id) or 12.0)
         self.kronos_min_rr_ratio = float(self.db.get_setting("kronos_min_rr_ratio", 1.8, user_id=user_id) or 1.8)
         self.kronos_adapter = KronosAdapter(model_id=self.kronos_model_id)
@@ -701,7 +702,9 @@ class BinanceBot:
                         self.kronos_forecast = kf.to_dict()
                         self.prediction["kronos_forecast"] = self.kronos_forecast
                     except Exception as k_exc:
-                        self._log(f"Kronos forecast warning: {k_exc}", "DEBUG")
+                        self.kronos_forecast = {}
+                        self.prediction.pop("kronos_forecast", None)
+                        self._log(f"Kronos forecast unavailable: {type(k_exc).__name__}", "ERROR")
 
                     # Microstructure analysis (OBI, OI regime, Funding, Force orders)
                     try:
@@ -1155,7 +1158,26 @@ class BinanceBot:
                         f"⚠️ Error checking mutual exclusion: {e}", "WARNING")
 
             if isinstance(strategy, KronosQuantStrategy):
-                if not getattr(self, "prefilter_ready", False) or (
+                if self.market_type == "FUTURES" and not self.is_paper and (
+                    self.timeframe != "1h"
+                    or self.order_execution_style != "MARKET"
+                    or self.kronos_horizon_bars != KRONOS_HORIZON_BARS
+                    or self.kronos_sample_count != KRONOS_SAMPLE_COUNT
+                ):
+                    is_blocked_by_exclusion = True
+                    entry_reason = "kronos_profile_mismatch"
+                    self.last_buy_block_reason = entry_reason
+                    self._log("Futures entry blocked: Kronos profile mismatch", "ERROR")
+                elif self.market_type == "FUTURES" and not self.is_paper and (
+                    not strategy.neural_forecast_ready(
+                        self.kronos_forecast, self.symbol, self.timeframe, self.last_closed_bar_time
+                    )
+                ):
+                    is_blocked_by_exclusion = True
+                    entry_reason = "kronos_neural_required"
+                    self.last_buy_block_reason = entry_reason
+                    self._log("Futures entry blocked: Kronos neural forecast unavailable", "ERROR")
+                elif not getattr(self, "prefilter_ready", False) or (
                     self.market_type == "FUTURES" and self.symbol != "BTCUSDT" and not self.macro_lead
                 ):
                     is_blocked_by_exclusion = True
@@ -1605,11 +1627,11 @@ class BinanceBot:
             raise RuntimeError("Futures stop endpoint unavailable")
         stop_side = "SELL" if entry_side == "BUY" else "BUY"
         atr_val = float(getattr(self, "atr", 0.0) or 0.0)
-        atr_dist = max(atr_val * float(getattr(self, "atr_stop_mult", 1.6) or 1.6), fill_price * (float(self.stop_loss_pct) / 100.0))
-        if entry_side == "BUY":
-            stop_price = fill_price - atr_dist
-        else:
-            stop_price = fill_price + atr_dist
+        stop_price = calculate_native_futures_stop(
+            fill_price, atr_val, float(self.stop_loss_pct),
+            float(getattr(self, "atr_stop_mult", 1.6) or 1.6),
+            "LONG" if entry_side == "BUY" else "SHORT",
+        )
         self._log(f"🛡️ Colocando orden nativa exchange STOP_MARKET {symbol}: side={stop_side}, stopPrice={stop_price:.4f}", "INFO")
         return self.client.place_futures_stop_market(symbol=symbol, side=stop_side, stop_price=stop_price)
 

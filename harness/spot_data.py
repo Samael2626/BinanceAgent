@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import io
+import http.client
 import time
 import urllib.error
 import urllib.request
@@ -59,7 +60,7 @@ def _fetch(url: str, timeout: int) -> bytes:
         except urllib.error.HTTPError as exc:
             if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
                 raise
-        except (TimeoutError, urllib.error.URLError):
+        except (TimeoutError, urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError):
             if attempt == 3:
                 raise
         time.sleep(2 ** attempt)

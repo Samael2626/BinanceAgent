@@ -1,4 +1,6 @@
 import zipfile
+from http.client import IncompleteRead
+from unittest.mock import MagicMock, patch
 import os
 import sys
 from datetime import datetime, timezone
@@ -7,7 +9,14 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from harness.spot_data import iter_bars, parse_timestamp
+from harness.spot_data import _fetch, iter_bars, parse_timestamp
+
+
+def test_fetch_retries_truncated_archive():
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b"complete"
+    with patch("harness.spot_data.urllib.request.urlopen", side_effect=[IncompleteRead(b"partial", 1), response]), patch("harness.spot_data.time.sleep"):
+        assert _fetch("https://example.invalid/archive.zip", 1) == b"complete"
 
 
 def _archive(path, rows):

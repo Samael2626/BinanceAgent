@@ -16,6 +16,9 @@ from typing import Any, Dict
 
 from .base_strategy import BaseStrategy
 
+KRONOS_HORIZON_BARS = 12
+KRONOS_SAMPLE_COUNT = 20
+
 
 class KronosQuantStrategy(BaseStrategy):
     def __init__(self):
@@ -23,6 +26,20 @@ class KronosQuantStrategy(BaseStrategy):
 
     def get_required_indicators(self) -> list:
         return ["rsi", "macd_hist", "macd_signal", "trend_ema", "fast_ema", "atr", "adx"]
+
+    @staticmethod
+    def neural_forecast_ready(forecast: dict, symbol: str, timeframe: str, last_closed_bar_time: int) -> bool:
+        if timeframe != "1h" or last_closed_bar_time <= 0:
+            return False
+        try:
+            return (
+                forecast.get("backend_mode") == "kronos_hf"
+                and forecast.get("symbol") == symbol
+                and forecast.get("timeframe") == timeframe
+                and abs(int(forecast.get("last_candle_ts", 0)) - (last_closed_bar_time - 3599) * 1000) <= 1000
+            )
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def classify_entry_prefilter(indicators: Dict[str, Any], state: Dict[str, Any]) -> dict[str, bool]:
