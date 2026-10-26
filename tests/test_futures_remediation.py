@@ -1,197 +1,236 @@
-"""
-Unit tests validating remediation of Codex audit findings for Binance Futures execution:
-1. Futures quantity normalization via LOT_SIZE stepSize.
-2. setup_futures_symbol handling margin type and -4046 idempotent code.
-3. place_futures_order and place_futures_stop_market calling futures endpoints.
-4. Fail-loud stop loss placement with emergency market close on exchange stop rejection.
-5. Global account 1-position mutex via get_futures_open_positions.
-6. Database credential security (purge on init, Fernet retrieval, refusal to write raw credentials).
-7. Rotating log handler configuration (5MB, 3 backups).
-"""
-
-import gc
+import base64
+import hashlib
 import logging
-from logging.handlers import RotatingFileHandler
-import os
 import sqlite3
-import sys
+import tempfile
+import threading
 import unittest
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from cryptography.fernet import Fernet
 
 from backend.binance_wrapper import BinanceWrapper
 from backend.bot_logic import BinanceBot, _bot_logger
 from backend.database import DatabaseManager
+from backend.strategies.kronos_quant import KronosQuantStrategy
+
+
+class StateDB:
+    def __init__(self):
+        self.values = {}
+
+    def save_state(self, key, value, user_id=1):
+        self.values[key] = value
+
+    def get_state(self, key, default=None, user_id=1):
+        return self.values.get(key, default)
+
+
+def make_bot():
+    bot = object.__new__(BinanceBot)
+    bot.user_id = 1
+    bot.symbol = "ETHUSDT"
+    bot.market_type = "FUTURES"
+    bot.is_paper = False
+    bot.is_testnet = True
+    bot.order_execution_style = "MARKET"
+    bot.position_side = "LONG"
+    bot.pending_order = {}
+    bot._order_lock = threading.RLock()
+    bot.db = StateDB()
+    bot.client = MagicMock()
+    bot.client.get_futures_open_positions.return_value = []
+    bot.client.get_futures_open_entry_orders.return_value = []
+    bot.client.get_futures_account_balance.return_value = {"available": 47.0, "total": 47.0}
+    bot._handle_trade_execution = MagicMock(return_value={"status": "FILLED"})
+    bot._reset_position_state = MagicMock()
+    bot._log = MagicMock()
+    bot.is_running = True
+    bot.enable_buying = True
+    return bot
 
 
 class TestFuturesRemediation(unittest.TestCase):
-    def test_normalize_futures_quantity(self):
-        wrapper = BinanceWrapper(api_key="mock", api_secret="mock")
-        def mock_info(symbol):
-            if symbol == "BTCUSDT":
-                return {
-                    "symbol": "BTCUSDT",
-                    "filters": [{"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"}],
-                }
-            elif symbol == "ADAUSDT":
-                return {
-                    "symbol": "ADAUSDT",
-                    "filters": [{"filterType": "LOT_SIZE", "minQty": "1", "stepSize": "1"}],
-                }
-            return None
+    def setUp(self):
+        self.wrapper = object.__new__(BinanceWrapper)
+        self.wrapper.client = MagicMock()
+        self.wrapper.get_futures_symbol_info = MagicMock(return_value={
+            "symbol": "ETHUSDT", "status": "TRADING", "filters": [
+                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "1000", "stepSize": "0.001"},
+                {"filterType": "MARKET_LOT_SIZE", "minQty": "0.001", "maxQty": "1000", "stepSize": "0.001"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                {"filterType": "PRICE_FILTER", "minPrice": "0.01", "maxPrice": "100000", "tickSize": "0.01"},
+            ],
+        })
 
-        wrapper.get_futures_symbol_info = MagicMock(side_effect=mock_info)
+    def test_futures_filters_and_normalization(self):
+        self.assertEqual(self.wrapper.normalize_futures_quantity("ETHUSDT", 0.0129), 0.012)
+        self.assertEqual(self.wrapper.normalize_futures_price("ETHUSDT", 2500.019), 2500.01)
+        self.assertFalse(self.wrapper.validate_futures_order("ETHUSDT", 0.0129, 2500.0)[0])
+        self.assertFalse(self.wrapper.validate_futures_order("ETHUSDT", 0.012, 2500.015, "STOP_MARKET")[0])
+        self.assertTrue(self.wrapper.validate_futures_order("ETHUSDT", 0.012, 2500.01)[0])
 
-        # BTC: 0.00129 -> 0.001
-        self.assertEqual(wrapper.normalize_futures_quantity("BTCUSDT", 0.00129), 0.001)
-        # ADA: 35.8 -> 35.0
-        self.assertEqual(wrapper.normalize_futures_quantity("ADAUSDT", 35.8), 35.0)
+    def test_account_position_lookup_fails_closed(self):
+        self.wrapper.client.futures_position_information.side_effect = TimeoutError("API timeout")
+        with self.assertRaises(TimeoutError):
+            self.wrapper.get_futures_open_positions()
 
-    def test_setup_futures_symbol_handles_minus_4046(self):
-        wrapper = BinanceWrapper(api_key="mock", api_secret="mock")
-        wrapper.client = MagicMock()
-        from binance.exceptions import BinanceAPIException
-        from requests.models import Response
-        res = Response()
-        res.status_code = 400
-        wrapper.client.futures_change_margin_type.side_effect = BinanceAPIException(
-            res, 400, '{"code": -4046, "msg": "No need to change margin type."}'
+    def test_setup_requires_one_way_isolated_two_x(self):
+        self.wrapper.client.futures_get_position_mode.return_value = {"dualSidePosition": False}
+        self.wrapper.client.futures_change_leverage.return_value = {"leverage": 2}
+        self.assertTrue(self.wrapper.setup_futures_symbol("ETHUSDT", 2, "ISOLATED"))
+        self.wrapper.client.futures_change_margin_type.assert_called_once_with(
+            symbol="ETHUSDT", marginType="ISOLATED"
         )
-        wrapper.setup_futures_symbol("ETHUSDT", leverage=2, margin_type="ISOLATED")
-        wrapper.client.futures_change_leverage.assert_called_once_with(symbol="ETHUSDT", leverage=2)
+        with self.assertRaises(ValueError):
+            self.wrapper.setup_futures_symbol("ETHUSDT", 3, "ISOLATED")
+        self.wrapper.client.futures_get_position_mode.return_value = {"dualSidePosition": True}
+        with self.assertRaises(RuntimeError):
+            self.wrapper.setup_futures_symbol("ETHUSDT", 2, "ISOLATED")
 
-    def test_place_futures_order_and_stop_market(self):
-        wrapper = BinanceWrapper(api_key="mock", api_secret="mock")
-        wrapper.client = MagicMock()
-        wrapper.normalize_futures_quantity = MagicMock(return_value=0.5)
-
-        wrapper.client.futures_create_order.return_value = {
-            "orderId": 12345, "symbol": "ETHUSDT", "status": "FILLED"
+    def test_entry_and_stop_use_distinct_fapi_endpoints(self):
+        self.wrapper.client.futures_create_order.return_value = {"status": "FILLED"}
+        self.wrapper.place_futures_order("ETHUSDT", "BUY", 0.012)
+        self.wrapper.client.futures_create_order.assert_called_once()
+        self.wrapper.client.futures_create_algo_order.return_value = {
+            "algoStatus": "NEW", "clientAlgoId": "stop_test"
         }
-
-        # Entry order
-        res = wrapper.place_futures_order("ETHUSDT", "BUY", 0.5, client_order_id="ba_test_entry")
-        self.assertEqual(res["orderId"], 12345)
-        wrapper.client.futures_create_order.assert_called_with(
-            symbol="ETHUSDT",
-            side="BUY",
-            type="MARKET",
-            quantity="0.5",
-            newClientOrderId="ba_test_entry",
-            newOrderRespType="RESULT",
+        stop = self.wrapper.place_futures_stop_market(
+            "ETHUSDT", "SELL", 2462.019, client_order_id="stop_test"
         )
+        self.assertEqual(stop["clientAlgoId"], "stop_test")
+        params = self.wrapper.client.futures_create_algo_order.call_args.kwargs
+        self.assertEqual(params["algoType"], "CONDITIONAL")
+        self.assertEqual(params["type"], "STOP_MARKET")
+        self.assertEqual(params["triggerPrice"], "2462.01")
+        self.assertEqual(params["closePosition"], "true")
+        self.assertEqual(params["workingType"], "CONTRACT_PRICE")
+        self.assertNotIn("quantity", params)
+        self.assertNotIn("stopPrice", params)
 
-        # Stop Market order
-        res_stop = wrapper.place_futures_stop_market("ETHUSDT", "SELL", 2500.0, 0.5, client_order_id="ba_test_stop")
-        wrapper.client.futures_create_order.assert_called_with(
-            symbol="ETHUSDT",
-            side="SELL",
-            type="STOP_MARKET",
-            stopPrice="2500",
-            quantity="0.5",
-            newClientOrderId="ba_test_stop",
-            reduceOnly="true",
-        )
+    def test_global_mutex_blocks_before_order_and_pending_state(self):
+        bot = make_bot()
+        bot.client.get_futures_open_positions.return_value = [{"symbol": "SOLUSDT", "positionAmt": "1"}]
+        with self.assertRaises(RuntimeError):
+            bot._submit_order("ETHUSDT", "BUY", 0.008, 2500.0, "KRONOS", position_side="LONG")
+        bot.client.place_futures_order.assert_not_called()
+        self.assertEqual(bot.pending_order, {})
+        bot.client.get_futures_open_positions.side_effect = TimeoutError("API timeout")
+        with self.assertRaises(TimeoutError):
+            bot._submit_order("ETHUSDT", "BUY", 0.008, 2500.0, "KRONOS", position_side="LONG")
+        bot.client.place_futures_order.assert_not_called()
 
-    def test_fail_loud_stop_loss_emergency_market_close(self):
-        bot = BinanceBot()
-        bot.client = MagicMock()
-        bot.is_paper = False
-        bot.is_testnet = True
-        bot.market_type = "FUTURES"
-        bot.order_execution_style = "MARKET"
-        bot.pending_order = {}
-        delattr(bot.client, "place_smart_maker_order")
+    def test_entry_notional_cap_blocks_manual_oversize(self):
+        bot = make_bot()
+        with self.assertRaisesRegex(RuntimeError, "exceeds 20 USDT"):
+            bot._submit_order("ETHUSDT", "BUY", 0.009, 2500.0, "MANUAL", position_side="LONG")
+        bot.client.place_futures_order.assert_not_called()
+        self.assertEqual(bot.pending_order, {})
 
-        # Simulate entry order fill
-        bot.client.place_futures_order.return_value = {
-            "orderId": 9999,
-            "symbol": "ETHUSDT",
-            "status": "FILLED",
-            "executedQty": "0.5",
-            "cummulativeQuoteQty": "1250.0",
-        }
+    def test_exchange_flat_reconciles_local_position(self):
+        bot = make_bot()
+        bot.accumulated_qty = 0.008
+        bot.db.save_state("stop_client_id_ETHUSDT", "stop_test")
+        bot._reconcile_futures_position()
+        bot.client.cancel_futures_stop.assert_called_once_with("ETHUSDT", "stop_test")
+        bot._reset_position_state.assert_called_once()
+        self.assertEqual(bot.db.values["stop_client_id_ETHUSDT"], "")
 
-        # Make stop market order fail
-        bot.client.place_futures_stop_market.side_effect = RuntimeError("Binance exchange stop endpoint error")
+    def test_exchange_qty_mismatch_halts(self):
+        bot = make_bot()
+        bot.accumulated_qty = 0.008
+        bot.client.get_futures_open_positions.return_value = [{"symbol": "ETHUSDT", "positionAmt": "-0.008"}]
+        bot._reconcile_futures_position()
+        self.assertFalse(bot.is_running)
+        self.assertFalse(bot.enable_buying)
+        self.assertEqual(bot.db.values["is_running"], False)
 
-        # Mock trade execution handler to return success
-        bot._handle_trade_execution = MagicMock(return_value={"status": "FILLED", "orderId": 9999})
-
-        # Calling _submit_order for an entry should catch the stop failure,
-        # trigger emergency market close, and raise RuntimeError with FAIL_LOUD_STOP_FAILED
-        with self.assertRaises(RuntimeError) as ctx:
-            bot._submit_order("ETHUSDT", "BUY", 0.5, 2500.0, "KRONOS", position_side="LONG")
-
-        self.assertIn("FAIL_LOUD_STOP_FAILED", str(ctx.exception))
-
-        # Verify emergency market close was dispatched
-        bot.client.place_futures_order.assert_called_with(
-            "ETHUSDT",
-            "SELL",
-            0.5,
-            order_type="MARKET",
-            reduce_only=True,
-        )
-
-    def test_global_account_1_position_mutex(self):
-        bot = BinanceBot()
-        bot.client = MagicMock()
-        bot.is_paper = False
-        bot.is_testnet = True
-        bot.market_type = "FUTURES"
-        bot.symbol = "ETHUSDT"
-        bot.has_open_position = False
-
-        # Simulate open position in another symbol (e.g. SOLUSDT) on the exchange account
-        bot.client.get_futures_open_positions.return_value = [
-            {"symbol": "SOLUSDT", "positionAmt": 1.25, "entryPrice": 140.0}
+    def test_stop_failure_closes_and_halts_for_review(self):
+        bot = make_bot()
+        bot.client.place_futures_order.side_effect = [
+            {"status": "FILLED", "executedQty": "0.008", "avgPrice": "2501", "cumQuote": "20.008"},
+            {"status": "FILLED", "executedQty": "0.008", "avgPrice": "2500"},
         ]
+        bot._place_exchange_stop_protection = MagicMock(side_effect=RuntimeError("stop rejected"))
+        with self.assertRaisesRegex(RuntimeError, "FAIL_LOUD_STOP_FAILED"):
+            bot._submit_order("ETHUSDT", "BUY", 0.008, 2500.0, "KRONOS", position_side="LONG")
+        bot._place_exchange_stop_protection.assert_called_once_with("ETHUSDT", "BUY", 0.008, 2501.0)
+        self.assertTrue(bot.client.place_futures_order.call_args.kwargs["reduce_only"])
+        bot._handle_trade_execution.assert_not_called()
+        bot._reset_position_state.assert_called_once()
+        self.assertFalse(bot.is_running)
+        self.assertTrue(bot.pending_order)
 
-        # Verify that account mutex detects existing position
-        positions = bot.client.get_futures_open_positions()
-        has_other_pos = any(p["symbol"] != bot.symbol and abs(p["positionAmt"]) > 0 for p in positions)
-        self.assertTrue(has_other_pos)
+    def test_unconfirmed_emergency_close_retains_pending_review(self):
+        bot = make_bot()
+        bot.client.place_futures_order.side_effect = [
+            {"status": "FILLED", "executedQty": "0.008", "avgPrice": "2501"},
+            TimeoutError("emergency close uncertain"),
+        ]
+        bot._place_exchange_stop_protection = MagicMock(side_effect=RuntimeError("stop rejected"))
+        with self.assertRaises(TimeoutError):
+            bot._submit_order("ETHUSDT", "BUY", 0.008, 2500.0, "KRONOS", position_side="LONG")
+        self.assertFalse(bot.is_running)
+        self.assertTrue(bot.pending_order)
 
-    def test_database_credentials_purged_and_refused(self):
-        import tempfile
-        fd, temp_db = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
+    def test_closed_bar_counter_and_intrabar_extremes(self):
+        bot = make_bot()
+        bot.accumulated_qty = 0.008
+        bot.last_closed_bar_time = 100
+        bot.bars_held = 0
+        bot.highest_price = 2500.0
+        bot.lowest_price = 2500.0
+        bot.current_price = 2500.0
+        bot.history = []
+        bot.lock = threading.Lock()
+        bot._record_closed_bar(200, 2502.0, 2498.0)
+        bot._record_closed_bar(200, 2502.0, 2498.0)
+        self.assertEqual(bot.bars_held, 1)
+        bot._on_kline_msg({"s": "ETHUSDT", "k": {"c": "2500", "h": "2505", "l": "2495", "x": False}})
+        self.assertEqual((bot.highest_price, bot.lowest_price), (2505.0, 2495.0))
+        self.assertEqual(bot.db.values["highest_price_ETHUSDT"], 2505.0)
 
-        try:
-            # Seed legacy raw plaintext credential in DB
-            raw_conn = sqlite3.connect(temp_db)
-            raw_conn.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)")
-            raw_conn.execute("INSERT INTO state (key, value) VALUES ('credentials', 'plaintext_secret')")
-            raw_conn.commit()
-            raw_conn.close()
+    def test_prefilter_rejects_weak_rvol(self):
+        indicators = {"rvol": 1.2, "candle_close_pct": 0.9, "rsi": 60,
+                      "adx": 30, "trend_ema": 2400, "fast_ema": 2450,
+                      "ema_50": 2450, "donchian_high_36": 2490,
+                      "donchian_low_36": 2200, "return_z_score": 0}
+        result = KronosQuantStrategy.classify_entry_prefilter(
+            indicators, {"current_price": 2500, "macro_lead": {"trend": "NEUTRAL"}}
+        )
+        self.assertFalse(any(result.values()))
+        indicators["rvol"] = 2.0
+        self.assertTrue(KronosQuantStrategy.classify_entry_prefilter(
+            indicators, {"current_price": 2500, "macro_lead": {"trend": "NEUTRAL"}}
+        )["bull_breakout"])
 
-            # Initialize DatabaseManager on this DB -> should purge credentials from state table
-            db = DatabaseManager(temp_db)
-            val = db.get_state("credentials")
-            self.assertIsNone(val)
+    def test_credentials_purged_and_master_key_migrates_legacy(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            "os.environ", {"BINANCE_DB_FERNET_KEY": Fernet.generate_key().decode()}
+        ):
+            db_path = str(Path(temp_dir) / "bot.db")
+            db = DatabaseManager(db_path)
+            user_id = db.create_user("sample", "test_api_key", "test_api_secret", True)
+            with db._get_connection() as conn:
+                conn.execute("INSERT INTO state (user_id, key, value) VALUES (?, 'credentials', 'legacy_plaintext')", (user_id,))
+                legacy = Fernet(base64.urlsafe_b64encode(hashlib.sha256(
+                    f"{user_id}_encryption_salt".encode()
+                ).digest()))
+                conn.execute("UPDATE users SET api_key_encrypted = ? WHERE id = ?", (
+                    legacy.encrypt(b"test_api_key").decode(), user_id
+                ))
+            migrated = DatabaseManager(db_path)
+            self.assertIsNone(migrated.get_state("credentials", user_id=user_id))
+            self.assertEqual(migrated.get_user_by_id(user_id)["api_key"], "test_api_key")
+            with self.assertRaises(ValueError):
+                migrated.save_state("credentials", {"api_key": "bad"}, user_id=user_id)
 
-            # Saving raw credentials to state must be blocked
-            db.save_state("credentials", {"key": "abc", "secret": "123"})
-            self.assertIsNone(db.get_state("credentials"))
-            del db
-            gc.collect()
-        finally:
-            try:
-                if os.path.exists(temp_db):
-                    os.remove(temp_db)
-            except Exception:
-                pass
-
-    def test_rotating_logger_config(self):
-        has_rotating = False
-        for handler in _bot_logger.handlers:
-            if isinstance(handler, RotatingFileHandler):
-                has_rotating = True
-                self.assertGreaterEqual(handler.maxBytes, 5_000_000)
-                self.assertEqual(handler.backupCount, 3)
-        self.assertTrue(has_rotating, "RotatingFileHandler not found in _bot_logger")
+    def test_rotating_logger(self):
+        handlers = [h for h in _bot_logger.handlers if isinstance(h, RotatingFileHandler)]
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual((handlers[0].maxBytes, handlers[0].backupCount), (5_000_000, 3))
 
 
 if __name__ == "__main__":

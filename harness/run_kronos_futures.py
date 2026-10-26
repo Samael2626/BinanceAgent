@@ -29,7 +29,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from backend.services.kronos_adapter import KronosAdapter
+from backend.services.kronos_adapter import DEFAULT_KRONOS_MODEL, KronosAdapter
 from backend.services.microstructure import LeadLagAnalyzer
 from backend.strategies.kronos_quant import KronosQuantStrategy
 from harness import data_loader, engine, gate, metrics, splits
@@ -44,6 +44,10 @@ class FuturesCostModel:
     @classmethod
     def maker_base(cls) -> "FuturesCostModel":
         return cls(fee_pct_per_side=0.02, slippage_bps_per_side=1.0, funding_rate_8h_pct=0.01)
+
+    @classmethod
+    def taker_base(cls) -> "FuturesCostModel":
+        return cls(fee_pct_per_side=0.05, slippage_bps_per_side=1.0, funding_rate_8h_pct=0.01)
 
     @classmethod
     def taker_stress(cls) -> "FuturesCostModel":
@@ -83,7 +87,7 @@ def simulate_futures_kronos(
         "market_type": "FUTURES",
         "futures_leverage": leverage,
         "futures_allow_short": True,
-        "order_execution_style": "LIMIT_MAKER" if cost_model.fee_pct_per_side <= 0.025 else "MARKET",
+        "order_execution_style": "MARKET",
         "stop_loss_pct": 1.5,
         "take_profit_pct": 2.0,
         "atr_stop_mult": 1.6,
@@ -141,7 +145,7 @@ def simulate_futures_kronos(
     ret_std = ret_1b.rolling(24).std().replace(0, 1e-6).fillna(1e-6)
     z_score_arr = ((ret_1b - ret_mean) / ret_std).to_numpy(float)
 
-    adapter = KronosAdapter(prefer_neural=False)
+    adapter = KronosAdapter(model_id=DEFAULT_KRONOS_MODEL)
     strat = KronosQuantStrategy()
 
     wallet = initial_equity
@@ -288,29 +292,20 @@ def simulate_futures_kronos(
             bull_candle_ok = close_pct_in_bar >= 0.60
             bear_candle_ok = close_pct_in_bar <= 0.40
 
-            is_long_liq_flush = (z_score_arr[i] <= -2.5) and (rvol >= 2.0) and (rsis[i] <= 28.0)
-            is_bull_breakout = (
-                (c > donchian_high_36[i])
-                and (rvol >= 2.0)
-                and (adxs[i] >= 28.0)
-                and (c > t_ema[i])
-                and (f_ema[i] > t_ema[i])
-                and (rsis[i] >= 52.0 and rsis[i] <= 66.0)
-                and bull_candle_ok
-            )
-            is_bear_breakout = (
-                (c < donchian_low_36[i])
-                and (rvol >= 1.8)
-                and (adxs[i] >= 25.0)
-                and (c < t_ema[i])
-                and (ema_50[i] < t_ema[i])
-                and (rsis[i] <= 48.0 and rsis[i] >= 33.0)
-                and bear_candle_ok
-                and short_allowed
-            )
-            is_short_squeeze_flush = (z_score_arr[i] >= 2.8) and (rvol >= 2.2) and (rsis[i] >= 75.0) and short_allowed
+            prefilter = strat.classify_entry_prefilter({
+                "rvol": rvol, "candle_close_pct": close_pct_in_bar,
+                "rsi": rsis[i], "adx": adxs[i], "trend_ema": t_ema[i],
+                "fast_ema": f_ema[i], "ema_50": ema_50[i],
+                "return_z_score": z_score_arr[i],
+                "donchian_high_36": donchian_high_36[i],
+                "donchian_low_36": donchian_low_36[i],
+            }, {"current_price": c, "macro_lead": macro_lead})
+            is_long_liq_flush = prefilter["long_liq_flush"]
+            is_bull_breakout = prefilter["bull_breakout"]
+            is_bear_breakout = prefilter["bear_breakout"]
+            is_short_squeeze_flush = prefilter["short_squeeze_flush"]
 
-            if not (is_bull_breakout or is_bear_breakout or is_long_liq_flush or is_short_squeeze_flush):
+            if not any(prefilter.values()):
                 curve.append({"time": t, "equity": float(wallet)})
                 continue
 
@@ -432,11 +427,12 @@ def simulate_random_futures_baseline(
         prev_c = s_close.shift(1).fillna(s_close)
         tr = np.maximum(highs - lows, np.maximum(np.abs(highs - prev_c), np.abs(lows - prev_c)))
         atrs = pd.Series(tr).ewm(alpha=1 / 14, adjust=False).mean().to_numpy(float)
-        prepped.append((opens, highs, lows, closes, ema_50, atrs, max(250, s_idx), min(len(d) - 24, e_idx - 24)))
+        times = pd.to_datetime(d["open_time"], utc=True).to_numpy()
+        prepped.append((opens, highs, lows, closes, ema_50, atrs, times, max(250, s_idx), min(len(d) - 24, e_idx - 24)))
 
     for _ in range(runs):
-        pnls: list[float] = []
-        for opens, highs, lows, closes, ema_50, atrs, lo_idx, hi_idx in prepped:
+        candidates: list[tuple[np.datetime64, np.datetime64, float]] = []
+        for opens, highs, lows, closes, ema_50, atrs, times, lo_idx, hi_idx in prepped:
             if hi_idx <= lo_idx + 10:
                 continue
             entries = sorted(rng.choice(np.arange(lo_idx, hi_idx), size=min(target_trades_per_symbol, (hi_idx - lo_idx) // 4), replace=False))
@@ -512,8 +508,16 @@ def simulate_random_futures_baseline(
                 gross = (exit_fill - entry_fill) * qty if side == "LONG" else (entry_fill - exit_fill) * qty
                 funding_periods = max(0, (exit_bar - (idx + 1)) // 8)
                 funding_cost = notional_per_trade * (cost_model.funding_rate_8h_pct / 100.0) * funding_periods * (1.0 if side == "LONG" else -1.0)
-                pnls.append(gross - entry_fee - exit_fee - funding_cost)
+                candidates.append((times[idx + 1], times[exit_bar], gross - entry_fee - exit_fee - funding_cost))
                 next_free = exit_bar + 6
+        pnls: list[float] = []
+        free_time = None
+        wallet = 47.0
+        for entry_time, exit_time, pnl in sorted(candidates, key=lambda item: item[0]):
+            if (free_time is None or entry_time >= free_time) and wallet >= notional_per_trade / 2 + cost_model.fee_usdt(notional_per_trade):
+                pnls.append(pnl)
+                wallet += pnl
+                free_time = exit_time
         if pnls:
             run_expectancies.append(float(np.mean(pnls)))
 
@@ -542,7 +546,7 @@ def main() -> None:
         print(f"  [warn] BTCUSDT anchor data unavailable: {exc}")
 
     for label, cm in [
-        ("FUTURES MAKER (2bps fee, 1bp slip)", FuturesCostModel.maker_base()),
+        ("FUTURES TAKER (5bps fee, 1bp slip)", FuturesCostModel.taker_base()),
         ("FUTURES STRESS TAKER (5bps fee, 4bps slip)", FuturesCostModel.taker_stress()),
     ]:
         all_trades = []
@@ -582,8 +586,7 @@ def main() -> None:
         print(f"  [Pooled Statistical Sample - Universe]")
         print(f"  {m.row()}")
         print(f"  Random Monte Carlo p95 E/trade ({args.notional:.1f} USDT) = {rand_p95:+.4f} USDT")
-        g = gate.assess_backtest(m, random_p95=rand_p95, max_drawdown_pct=8.0)
-        print(f"  Gate passed={g.passed} reasons={g.reasons}")
+        print("  Pooled sample is descriptive only; it cannot pass the live gate.")
 
         # Live 1-position global portfolio execution metrics (matching production rule: 'Una posicion a la vez' on 47 USDT wallet)
         sorted_trades = sorted(all_trades, key=lambda x: x["entry_time"])
@@ -605,8 +608,13 @@ def main() -> None:
             s_single = s_single.reindex(base_idx.union(s_single.index)).ffill().fillna(47.0)
             single_curve = [{"time": k, "equity": float(v)} for k, v in s_single.items()]
             m_single = metrics.compute(live_trades, single_curve, 47.0)
-            print(f"  [Live Production 1-Pos Concurrency - $47 Wallet]")
+            preliminary = gate.assess_backtest(m_single, random_p95=rand_p95, max_drawdown_pct=8.0)
+            g = gate.GateResult(False, preliminary.reasons + (
+                "falta simulacion cronologica event-driven de una billetera global",
+            ))
+            print(f"  [Proxy 1-Pos Concurrency - $47 Wallet; NO CERTIFICA REAL]")
             print(f"  {m_single.row()}")
+            print(f"  Gate passed={g.passed} reasons={g.reasons}")
             sp_wins = [t for t in live_trades if t["net_pnl"] > 0]
             sp_wr = len(sp_wins) / len(live_trades) * 100.0
             sp_gw = sum(t["net_pnl"] for t in sp_wins)

@@ -195,7 +195,7 @@ class BinanceWrapper:
             return {"open_interest": 0.0, "oi_change_pct": 0.0}
 
     def validate_futures_order(
-        self, symbol: str, quantity: float, price: float
+        self, symbol: str, quantity: float, price: float, order_type: str = "MARKET"
     ) -> tuple[bool, str]:
         """Validates LOT_SIZE, MARKET_LOT_SIZE, and MIN_NOTIONAL on USDⓈ-M Futures."""
         if quantity <= 0:
@@ -210,8 +210,12 @@ class BinanceWrapper:
             return _reject_order("symbol_not_trading", f"symbol {symbol} status is {info.get('status')}")
 
         filters = {f["filterType"]: f for f in info.get("filters", [])}
-        lot_filter = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE")
-        if lot_filter:
+        applicable = [filters.get("LOT_SIZE")]
+        if order_type == "MARKET":
+            applicable.append(filters.get("MARKET_LOT_SIZE"))
+        if not applicable[0]:
+            return _reject_order("lot_size_unavailable", symbol)
+        for lot_filter in filter(None, applicable):
             min_qty = float(lot_filter.get("minQty", 0) or 0)
             max_qty = float(lot_filter.get("maxQty", 0) or 0)
             step_size = float(lot_filter.get("stepSize", 0) or 0)
@@ -221,8 +225,20 @@ class BinanceWrapper:
                 return _reject_order("max_qty_failed", f"quantity {quantity} > maxQty {max_qty}")
             if step_size > 0:
                 quantized = self._quantize_to_step(quantity, step_size, ROUND_DOWN)
-                if abs(float(quantized) - float(quantity)) > max(step_size / 10.0, 1e-12):
+                if Decimal(str(quantized)) != Decimal(str(quantity)):
                     return _reject_order("step_size_failed", f"quantity {quantity} does not match stepSize {step_size}")
+
+        if order_type != "MARKET":
+            price_filter = filters.get("PRICE_FILTER")
+            if not price_filter:
+                return _reject_order("price_filter_unavailable", symbol)
+            tick_size = Decimal(str(price_filter.get("tickSize", "0")))
+            if tick_size <= 0 or Decimal(str(price)) % tick_size:
+                return _reject_order("tick_size_failed", f"price {price} does not match tickSize {tick_size}")
+            min_price = Decimal(str(price_filter.get("minPrice", "0")))
+            max_price = Decimal(str(price_filter.get("maxPrice", "0")))
+            if (min_price > 0 and Decimal(str(price)) < min_price) or (max_price > 0 and Decimal(str(price)) > max_price):
+                return _reject_order("price_filter_failed", f"price {price} outside PRICE_FILTER")
 
         min_notional = 5.0
         if "MIN_NOTIONAL" in filters:
@@ -246,13 +262,22 @@ class BinanceWrapper:
         """Rounds quantity to the nearest stepSize for the USDⓈ-M Futures symbol."""
         info = self.get_futures_symbol_info(symbol)
         if not info:
-            return float(quantity)
+            raise RuntimeError(f"Futures filters unavailable for {symbol}")
 
         filters = {f.get("filterType"): f for f in info.get("filters", [])}
-        lot_filter = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE")
+        lot_filter = filters.get("LOT_SIZE")
         if lot_filter and "stepSize" in lot_filter:
             return self._quantize_to_step(quantity, lot_filter["stepSize"], ROUND_DOWN)
-        return float(quantity)
+        raise RuntimeError(f"LOT_SIZE unavailable for {symbol}")
+
+    def normalize_futures_price(self, symbol: str, price: float) -> float:
+        info = self.get_futures_symbol_info(symbol)
+        if not info:
+            raise RuntimeError(f"Futures filters unavailable for {symbol}")
+        price_filter = next((f for f in info.get("filters", []) if f.get("filterType") == "PRICE_FILTER"), None)
+        if not price_filter:
+            raise RuntimeError(f"PRICE_FILTER unavailable for {symbol}")
+        return self._quantize_to_step(price, price_filter["tickSize"], ROUND_DOWN)
 
     def get_futures_account_balance(self, asset: str = "USDT") -> Dict[str, float]:
         """
@@ -268,9 +293,9 @@ class BinanceWrapper:
                         "available": float(a.get("availableBalance", 0.0) or 0.0),
                     }
             return {"total": 0.0, "available": 0.0}
-        except Exception as e:
-            logger.error("Error fetching futures balance: %s", e)
-            return {"total": 0.0, "available": 0.0}
+        except Exception:
+            logger.exception("Error fetching futures balance")
+            raise
 
     def get_futures_open_positions(self) -> List[Dict[str, Any]]:
         """
@@ -279,22 +304,33 @@ class BinanceWrapper:
         try:
             positions = self.client.futures_position_information()
             return [p for p in positions if abs(float(p.get("positionAmt", 0.0) or 0.0)) > 0.0]
-        except Exception as e:
-            logger.error("Error fetching open futures positions: %s", e)
-            return []
+        except Exception:
+            logger.exception("Error fetching open futures positions")
+            raise
+
+    def get_futures_open_entry_orders(self) -> List[Dict[str, Any]]:
+        orders = self.client.futures_get_open_orders()
+        return [order for order in orders if str(order.get("reduceOnly", False)).lower() != "true"
+                and str(order.get("closePosition", False)).lower() != "true"]
 
     def setup_futures_symbol(self, symbol: str, leverage: int = 2, margin_type: str = "ISOLATED") -> bool:
         """
         Enforces margin type (ISOLATED) and leverage (default 2x) on the symbol.
         Safely catches code -4046 ('No need to change margin type').
         """
+        if int(leverage) != 2 or margin_type != "ISOLATED":
+            raise ValueError("Live Futures requires ISOLATED margin and 2x leverage")
         try:
+            if self.client.futures_get_position_mode().get("dualSidePosition") is not False:
+                raise RuntimeError("Futures One-way position mode required")
             try:
                 self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
             except BinanceAPIException as e:
                 if getattr(e, "code", None) != -4046:
                     raise
-            self.client.futures_change_leverage(symbol=symbol, leverage=int(leverage))
+            response = self.client.futures_change_leverage(symbol=symbol, leverage=2)
+            if int(response.get("leverage", 0)) != 2:
+                raise RuntimeError("Futures leverage not confirmed at 2x")
             return True
         except Exception as e:
             logger.error("Error setting up futures symbol %s: %s", symbol, e)
@@ -514,6 +550,8 @@ class BinanceWrapper:
         """
         client_order_id = client_order_id or f"ba{uuid4().hex}"
         final_qty = self.normalize_futures_quantity(symbol, quantity)
+        if final_qty <= 0:
+            raise ValueError("Futures quantity rounded to zero")
         params: Dict[str, Any] = {
             "symbol": symbol,
             "side": side,
@@ -562,13 +600,29 @@ class BinanceWrapper:
         Uses closePosition=True when quantity is None, or reduceOnly=True when quantity is specified.
         """
         client_order_id = client_order_id or f"ba_sl_{uuid4().hex[:12]}"
+        trigger_price = self.normalize_futures_price(symbol, stop_price)
+        filters = {f["filterType"]: f for f in self.get_futures_symbol_info(symbol)["filters"]}
+        price_filter = filters.get("PRICE_FILTER")
+        if not price_filter:
+            raise ValueError(f"PRICE_FILTER unavailable for {symbol}")
+        min_price = float(price_filter.get("minPrice", 0) or 0)
+        max_price = float(price_filter.get("maxPrice", 0) or 0)
+        if trigger_price <= 0 or (min_price > 0 and trigger_price < min_price) or (max_price > 0 and trigger_price > max_price):
+            raise ValueError(f"Futures stop trigger outside PRICE_FILTER for {symbol}")
+        valid, reason = self.validate_futures_order(
+            symbol, self.normalize_futures_quantity(symbol, quantity), trigger_price, order_type="STOP_MARKET"
+        ) if quantity else (True, "OK")
+        if not valid:
+            raise ValueError(reason)
         params: Dict[str, Any] = {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side,
             "type": "STOP_MARKET",
-            "stopPrice": "{:.8f}".format(float(stop_price)).rstrip('0').rstrip('.'),
-            "newClientOrderId": client_order_id,
+            "triggerPrice": "{:.8f}".format(float(trigger_price)).rstrip('0').rstrip('.'),
+            "clientAlgoId": client_order_id,
             "closePosition": "true",
+            "workingType": "CONTRACT_PRICE",
         }
         if quantity is not None and quantity > 0:
             final_qty = self.normalize_futures_quantity(symbol, quantity)
@@ -577,19 +631,34 @@ class BinanceWrapper:
             params["reduceOnly"] = "true"
 
         try:
-            order = self.client.futures_create_order(**params)
+            order = self.client.futures_create_algo_order(**params)
+            if not order or order.get("algoStatus") not in {"NEW", "WORKING"}:
+                raise OrderStatusUnknown(symbol, client_order_id)
             return order
+        except (RequestTimeout, RequestConnectionError):
+            return self.get_futures_stop_by_client_id(symbol, client_order_id)
         except Exception as e:
             logger.error("FUTURES_STOP_MARKET_ERROR symbol=%s detail=%s", symbol, e)
             raise
 
+    def get_futures_stop_by_client_id(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
+        order = self.client.futures_get_algo_order(symbol=symbol, clientAlgoId=client_order_id)
+        if order.get("algoStatus") not in {"NEW", "WORKING"}:
+            raise OrderStatusUnknown(symbol, client_order_id)
+        return order
+
+    def cancel_futures_stop(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
+        return self.client.futures_cancel_algo_order(symbol=symbol, clientAlgoId=client_order_id)
+
     def cancel_futures_symbol_orders(self, symbol: str) -> Dict[str, Any]:
         """Cancels all open orders on Binance Futures for a symbol (e.g. pending stops)."""
         try:
-            return self.client.futures_cancel_all_open_orders(symbol=symbol)
+            normal = self.client.futures_cancel_all_open_orders(symbol=symbol)
+            algo = self.client.futures_cancel_all_algo_open_orders(symbol=symbol)
+            return {"normal": normal, "algo": algo}
         except Exception as e:
-            logger.warning("Could not cancel all open futures orders for %s: %s", symbol, e)
-            return {}
+            logger.error("Could not cancel all open futures orders for %s: %s", symbol, e)
+            raise
 
     def get_futures_order_by_client_id(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
         return self.client.futures_get_order(symbol=symbol, origClientOrderId=client_order_id)
@@ -606,7 +675,7 @@ class BinanceWrapper:
             )
         raise OrderStatusUnknown(symbol, client_order_id)
 
-    def start_kline_socket(self, symbol: str, interval: str, callback: Callable):
+    def start_kline_socket(self, symbol: str, interval: str, callback: Callable, futures: bool = False):
         """Starts a kline socket for the given symbol and interval with auto-reconnect."""
         # Ensure only one kline socket is active at a time to prevent "mixed state"
         for name in list(self._stop_events.keys()):
@@ -630,7 +699,8 @@ class BinanceWrapper:
                                 self.api_key, self.api_secret, testnet=self.testnet)
                             client.https_proxy = None
                             bsm = BinanceSocketManager(client)
-                            async with bsm.kline_socket(symbol=symbol, interval=interval) as stream:
+                            socket = bsm.kline_futures_socket(symbol=symbol, interval=interval) if futures else bsm.kline_socket(symbol=symbol, interval=interval)
+                            async with socket as stream:
                                 while not stop_event.is_set():
                                     try:
                                         msg = await asyncio.wait_for(stream.recv(), timeout=2.0)
@@ -673,7 +743,7 @@ class BinanceWrapper:
         t.start()
         self._sockets[name] = t
 
-    def start_user_socket(self, callback: Callable):
+    def start_user_socket(self, callback: Callable, futures: bool = False):
         """Starts a user data socket for account updates with auto-reconnect."""
         name = "user"
         self.stop_socket(name)
@@ -693,7 +763,8 @@ class BinanceWrapper:
                                 self.api_key, self.api_secret, testnet=self.testnet)
                             client.https_proxy = None
                             bsm = BinanceSocketManager(client)
-                            async with bsm.user_socket() as stream:
+                            socket = bsm.futures_user_socket() if futures else bsm.user_socket()
+                            async with socket as stream:
                                 while not stop_event.is_set():
                                     try:
                                         msg = await asyncio.wait_for(stream.recv(), timeout=2.0)

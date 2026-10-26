@@ -1,7 +1,10 @@
 import sqlite3
 import json
 import hashlib
+import os
+from contextlib import contextmanager
 from cryptography.fernet import Fernet
+from cryptography.fernet import InvalidToken
 import base64
 
 
@@ -19,28 +22,39 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error enabling WAL mode: {e}")
 
+    @contextmanager
     def _get_connection(self):
         """Returns a sqlite3 connection. WAL mode and foreign keys enabled."""
         conn = sqlite3.connect(self.db_name, timeout=10)
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _get_encryption_key(self, user_id: str) -> bytes:
-        """Generate a deterministic encryption key from user_id"""
-        # This creates a key from the user_id - simple but functional
-        # For production, consider using a master key from environment
-        key_material = hashlib.sha256(
-            f"{user_id}_encryption_salt".encode()).digest()
-        return base64.urlsafe_b64encode(key_material)
+        key = os.environ.get("BINANCE_DB_FERNET_KEY", "").encode()
+        if not key:
+            raise RuntimeError("BINANCE_DB_FERNET_KEY is required for stored API credentials")
+        Fernet(key)
+        return key
 
     def _encrypt_value(self, value: str, user_id: str) -> str:
         """Encrypt a value using Fernet"""
+        if not value:
+            return ""
         key = self._get_encryption_key(user_id)
         f = Fernet(key)
         return f.encrypt(value.encode()).decode()
 
     def _decrypt_value(self, encrypted_value: str, user_id: str) -> str:
         """Decrypt a value using Fernet"""
+        if not encrypted_value:
+            return ""
         key = self._get_encryption_key(user_id)
         f = Fernet(key)
         return f.decrypt(encrypted_value.encode()).decode()
@@ -215,10 +229,30 @@ class DatabaseManager:
                 ''')
 
             # Purge any legacy plaintext credentials saved in state
-            try:
-                cursor.execute("DELETE FROM state WHERE key = 'credentials'")
-            except Exception:
-                pass
+            cursor.execute("PRAGMA secure_delete=ON")
+            cursor.execute("DELETE FROM state WHERE key = 'credentials'")
+            if os.environ.get("BINANCE_DB_FERNET_KEY"):
+                master = Fernet(self._get_encryption_key("0"))
+                for user_id, encrypted_key, encrypted_secret in cursor.execute(
+                    "SELECT id, api_key_encrypted, api_secret_encrypted FROM users"
+                ).fetchall():
+                    legacy_key = base64.urlsafe_b64encode(hashlib.sha256(
+                        f"{user_id}_encryption_salt".encode()).digest())
+                    migrated = []
+                    for token in (encrypted_key, encrypted_secret):
+                        if not token:
+                            migrated.append("")
+                            continue
+                        try:
+                            master.decrypt(token.encode())
+                            migrated.append(token)
+                        except InvalidToken:
+                            value = Fernet(legacy_key).decrypt(token.encode())
+                            migrated.append(master.encrypt(value).decode())
+                    cursor.execute(
+                        "UPDATE users SET api_key_encrypted = ?, api_secret_encrypted = ? WHERE id = ?",
+                        (migrated[0], migrated[1], user_id),
+                    )
 
             conn.commit()
 
@@ -425,8 +459,7 @@ class DatabaseManager:
 
     def save_state(self, key: str, value, user_id: int = 1):
         if key == "credentials":
-            # Never store unencrypted credentials in plaintext state table
-            return
+            raise ValueError("API credentials cannot be stored in state")
         with self._get_connection() as conn:
             cursor = conn.cursor()
             # If value is a dict or list, store as JSON

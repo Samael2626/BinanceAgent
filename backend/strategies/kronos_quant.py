@@ -25,6 +25,31 @@ class KronosQuantStrategy(BaseStrategy):
         return ["rsi", "macd_hist", "macd_signal", "trend_ema", "fast_ema", "atr", "adx"]
 
     @staticmethod
+    def classify_entry_prefilter(indicators: Dict[str, Any], state: Dict[str, Any]) -> dict[str, bool]:
+        price = float(state.get("current_price", 0) or 0)
+        rvol = float(indicators.get("rvol", 0) or 0)
+        close_pct = float(indicators.get("candle_close_pct", -1) or -1)
+        rsi = float(indicators.get("rsi", 50) or 50)
+        adx = float(indicators.get("adx", 0) or 0)
+        trend = float(indicators.get("trend_ema", 0) or 0)
+        fast = float(indicators.get("fast_ema", 0) or 0)
+        ema50 = float(indicators.get("ema_50", 0) or 0)
+        z_score = float(indicators.get("return_z_score", 0) or 0)
+        high36 = float(indicators.get("donchian_high_36", 0) or 0)
+        low36 = float(indicators.get("donchian_low_36", 0) or 0)
+        macro = state.get("macro_lead") or {}
+        short_allowed = macro.get("trend") != "BULLISH"
+        return {
+            "long_liq_flush": z_score <= -2.5 and rvol >= 2.0 and rsi <= 28.0,
+            "bull_breakout": price > high36 and rvol >= 2.0 and adx >= 28.0
+                and price > trend and fast > trend and 52.0 <= rsi <= 66.0 and close_pct >= 0.60,
+            "bear_breakout": price < low36 and rvol >= 1.8 and adx >= 25.0
+                and price < trend and ema50 < trend and 33.0 <= rsi <= 48.0
+                and close_pct <= 0.40 and short_allowed,
+            "short_squeeze_flush": z_score >= 2.8 and rvol >= 2.2 and rsi >= 75.0 and short_allowed,
+        }
+
+    @staticmethod
     def _resolve_barriers_pct(indicators: Dict[str, Any], settings: Dict[str, Any], current_price: float, side: str = "LONG") -> tuple[float, float]:
         """
         Computes volatility-adapted Stop Loss (%) and Take Profit (%) enforcing
